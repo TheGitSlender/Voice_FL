@@ -1,0 +1,16 @@
+data/nodes/
+data/cache/
+data/salt.txt
+data/report/
+data/openslr___librispeech_asr/
+models/checkpoints/
+evaluation/results/
+__pycache__/
+*.pyc
+*.pkl
+.env
+mlruns/
+*.pt
+*.tar.gz
+.DS_Store
+notebooks/.ipynb_checkpoints/
