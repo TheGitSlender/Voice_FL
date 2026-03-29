@@ -30,9 +30,6 @@ import math
 import os
 from collections import defaultdict
 
-# Force soundfile audio backend — avoids torchcodec/libnvrtc dependency issues
-os.environ.setdefault("DATASETS_AUDIO_BACKEND", "soundfile")
-
 import librosa
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
@@ -94,10 +91,12 @@ def fig1_speaker_distribution(selected, nodes):
     # We'll load from the HuggingFace dataset cache if available; otherwise
     # we can only show the 20 selected speakers.
     try:
-        from datasets import load_dataset
-        ds = load_dataset("openslr/librispeech_asr", "clean", split="train.100", cache_dir="data")
         from collections import Counter
+
+        from datasets import Audio, load_dataset
         from tqdm import tqdm
+        ds = load_dataset("openslr/librispeech_asr", "clean", split="train.100", cache_dir="data")
+        ds = ds.cast_column("audio", Audio(decode=False))  # no audio decode needed
         counts = Counter()
         for row in tqdm(ds, total=len(ds), desc="Counting clips per speaker", leave=False):
             counts[row["speaker_id"]] += 1

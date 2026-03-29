@@ -24,16 +24,15 @@ Requires:
     data/cleaning_config.json
 """
 
+import io
 import json
 import os
 import pickle
 from collections import defaultdict
 
-# Force soundfile audio backend — avoids torchcodec/libnvrtc dependency issues
-os.environ.setdefault("DATASETS_AUDIO_BACKEND", "soundfile")
-
 import numpy as np
-from datasets import load_dataset
+import soundfile as sf
+from datasets import Audio, load_dataset
 from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
@@ -134,8 +133,14 @@ def filter_and_group(ds, mapping: dict[int, dict], cfg: dict) -> dict[str, list[
         node_id   = node_meta["node_id"]
         fc        = filter_counts[node_id]
 
-        arr = row["audio"]["array"].astype(np.float32)
-        sr  = row["audio"]["sampling_rate"]
+        audio_dict = row["audio"]
+        if audio_dict.get("bytes"):
+            arr, sr = sf.read(io.BytesIO(audio_dict["bytes"]), dtype="float32")
+        else:
+            arr, sr = sf.read(audio_dict["path"], dtype="float32")
+        if arr.ndim > 1:
+            arr = arr.mean(axis=1)  # stereo → mono
+        arr = arr.astype(np.float32)
         dur = len(arr) / sr
 
         # --- Cleaning filters ---
@@ -305,6 +310,7 @@ def main():
     print("STEP 2 — Loading LibriSpeech (from cache)")
     print("=" * 60)
     ds = load_dataset(DATASET_REPO, DATASET_CONFIG, split=DATASET_SPLIT, cache_dir="data")
+    ds = ds.cast_column("audio", Audio(decode=False))  # decode manually with soundfile
     print(f"Dataset loaded: {len(ds):,} clips")
     print()
 

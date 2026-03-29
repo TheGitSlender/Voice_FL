@@ -14,3 +14,8 @@ mlruns/
 *.tar.gz
 .DS_Store
 notebooks/.ipynb_checkpoints/
+
+
+# Claude setups
+.reports/
+docs/CODEMAPS/*

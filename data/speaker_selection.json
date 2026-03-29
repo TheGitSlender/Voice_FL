@@ -1,0 +1,208 @@
+{
+  "selected_speakers": [
+    {
+      "speaker_id": 6437,
+      "node_id": "node_001",
+      "anon_hash": "cf56da1f492675df104d9e38d332bc3b03ae6c33027fe2276d696e58e55d0bec",
+      "clip_count": 108,
+      "total_duration_s": 1505.690125,
+      "mean_duration_s": 13.941575231481481,
+      "duration_std": 1.9845614854732492,
+      "diversity_rank": 7
+    },
+    {
+      "speaker_id": 4853,
+      "node_id": "node_002",
+      "anon_hash": "dec8331cd69ccc490aaaf1c04e5622c584a27c2d9d48d38fe677042efcade3fa",
+      "clip_count": 111,
+      "total_duration_s": 1502.6649375,
+      "mean_duration_s": 13.53752195945946,
+      "duration_std": 2.2497779074987165,
+      "diversity_rank": 19
+    },
+    {
+      "speaker_id": 7517,
+      "node_id": "node_003",
+      "anon_hash": "458769b2ce386f57b552d7baf1b1a55549406147b2bf058c7d8a2b2c9bba475d",
+      "clip_count": 103,
+      "total_duration_s": 1457.3100000000002,
+      "mean_duration_s": 14.14864077669903,
+      "duration_std": 2.455438178372517,
+      "diversity_rank": 32
+    },
+    {
+      "speaker_id": 1553,
+      "node_id": "node_004",
+      "anon_hash": "357ea2f3f22fb9b46406796e39c0485e00ad0501fff071b20561a37aab105d4e",
+      "clip_count": 102,
+      "total_duration_s": 1349.2450000000003,
+      "mean_duration_s": 13.22789215686275,
+      "duration_std": 2.616226461936077,
+      "diversity_rank": 44
+    },
+    {
+      "speaker_id": 103,
+      "node_id": "node_005",
+      "anon_hash": "c958aada9842654282db93717e4ffb7f65a66bb10b2c57c7dd826b9088c96ca6",
+      "clip_count": 102,
+      "total_duration_s": 1423.1250000000002,
+      "mean_duration_s": 13.952205882352944,
+      "duration_std": 2.7279614752693324,
+      "diversity_rank": 57
+    },
+    {
+      "speaker_id": 4214,
+      "node_id": "node_006",
+      "anon_hash": "7ab3eb84fcf686bf9801acb534ba1334909d10bc9447c98bfda5f067fcf21c42",
+      "clip_count": 81,
+      "total_duration_s": 1046.7550625,
+      "mean_duration_s": 12.922902006172839,
+      "duration_std": 2.856628048652234,
+      "diversity_rank": 69
+    },
+    {
+      "speaker_id": 250,
+      "node_id": "node_007",
+      "anon_hash": "aa76564cae18aca8cccdf5e871862e40c0d12e325ee878d807f657e84a08fc70",
+      "clip_count": 114,
+      "total_duration_s": 1509.7350625,
+      "mean_duration_s": 13.243290021929823,
+      "duration_std": 2.9294203868771516,
+      "diversity_rank": 82
+    },
+    {
+      "speaker_id": 441,
+      "node_id": "node_008",
+      "anon_hash": "61e5e967ab55854a15bb4f21d654f5fde4b5cc76779b16b4a40418fbf51c783c",
+      "clip_count": 115,
+      "total_duration_s": 1511.5400624999997,
+      "mean_duration_s": 13.14382663043478,
+      "duration_std": 3.029384403213993,
+      "diversity_rank": 94
+    },
+    {
+      "speaker_id": 7178,
+      "node_id": "node_009",
+      "anon_hash": "102b8f162ddc37bb841b90031b8062293b274fcdebb82dfb5e99b5f96da78a73",
+      "clip_count": 115,
+      "total_duration_s": 1506.46,
+      "mean_duration_s": 13.099652173913043,
+      "duration_std": 3.1341784772056256,
+      "diversity_rank": 107
+    },
+    {
+      "speaker_id": 7505,
+      "node_id": "node_010",
+      "anon_hash": "000ec8d432593c522a78e65f680e01981638331ef958b1537f050995b74860cb",
+      "clip_count": 115,
+      "total_duration_s": 1507.6100000000001,
+      "mean_duration_s": 13.109652173913044,
+      "duration_std": 3.214306925209818,
+      "diversity_rank": 119
+    },
+    {
+      "speaker_id": 1334,
+      "node_id": "node_011",
+      "anon_hash": "397ab6699d55bd0d3604f29a8fe7303f016bcff057088bb8f03bfb3d1a54ace8",
+      "clip_count": 107,
+      "total_duration_s": 1433.465,
+      "mean_duration_s": 13.396869158878504,
+      "duration_std": 3.3418121263560225,
+      "diversity_rank": 132
+    },
+    {
+      "speaker_id": 6081,
+      "node_id": "node_012",
+      "anon_hash": "c3f41904542b06899433f4039de71cb8caab64a0bf33c64a4112be137adbcdb1",
+      "clip_count": 121,
+      "total_duration_s": 1506.265,
+      "mean_duration_s": 12.448471074380166,
+      "duration_std": 3.4190166461676927,
+      "diversity_rank": 144
+    },
+    {
+      "speaker_id": 3214,
+      "node_id": "node_013",
+      "anon_hash": "a52d532e7d86689b9bbff4bb9af683c6f3c399bb23b6258010224a07d424456c",
+      "clip_count": 116,
+      "total_duration_s": 1505.0649999999998,
+      "mean_duration_s": 12.974698275862067,
+      "duration_std": 3.5553108769454402,
+      "diversity_rank": 157
+    },
+    {
+      "speaker_id": 1992,
+      "node_id": "node_014",
+      "anon_hash": "356821749a735b0a8d4eadd0b65726bc606ea4c29b508ecf6bd6d2c842086614",
+      "clip_count": 56,
+      "total_duration_s": 737.5650625000001,
+      "mean_duration_s": 13.1708046875,
+      "duration_std": 3.6701944269432976,
+      "diversity_rank": 169
+    },
+    {
+      "speaker_id": 5750,
+      "node_id": "node_015",
+      "anon_hash": "2eed80e14047f20f365b459843914b0f5d8d0e7d4ae0871fda604549ad2a8eef",
+      "clip_count": 122,
+      "total_duration_s": 1504.5599374999997,
+      "mean_duration_s": 12.332458504098359,
+      "duration_std": 3.787079880645241,
+      "diversity_rank": 182
+    },
+    {
+      "speaker_id": 3830,
+      "node_id": "node_016",
+      "anon_hash": "840b6343d2497bcdbd8e76b4083f2f949c0be1cb8c3e535a45d06935134945b2",
+      "clip_count": 118,
+      "total_duration_s": 1440.7349375,
+      "mean_duration_s": 12.209618114406778,
+      "duration_std": 3.890339902594469,
+      "diversity_rank": 194
+    },
+    {
+      "speaker_id": 3242,
+      "node_id": "node_017",
+      "anon_hash": "80501d3c699e6303232093cb408d4b654155dc300d8c256ef477e1988aa356a3",
+      "clip_count": 123,
+      "total_duration_s": 1501.85,
+      "mean_duration_s": 12.210162601626015,
+      "duration_std": 4.063513043678407,
+      "diversity_rank": 207
+    },
+    {
+      "speaker_id": 6925,
+      "node_id": "node_018",
+      "anon_hash": "a4ca4002962ac6b12af8352138f6abd5d42bd39e71e81c5c172dd0b523b15d1c",
+      "clip_count": 86,
+      "total_duration_s": 1024.415,
+      "mean_duration_s": 11.911802325581395,
+      "duration_std": 4.133999202265238,
+      "diversity_rank": 219
+    },
+    {
+      "speaker_id": 7859,
+      "node_id": "node_019",
+      "anon_hash": "1d6c84718ac29639c36b59305bb01d519f9d35a89aa086eff49c3d3d51ce0719",
+      "clip_count": 110,
+      "total_duration_s": 1294.664875,
+      "mean_duration_s": 11.769680681818182,
+      "duration_std": 4.317733011477808,
+      "diversity_rank": 232
+    },
+    {
+      "speaker_id": 118,
+      "node_id": "node_020",
+      "anon_hash": "1af070273085979629ee859725b19a8fd38573f69347455a1c5a41cf694d44ae",
+      "clip_count": 137,
+      "total_duration_s": 1503.2151249999997,
+      "mean_duration_s": 10.97237317518248,
+      "duration_std": 4.587844798245538,
+      "diversity_rank": 244
+    }
+  ],
+  "total_speakers_available": 251,
+  "selection_strategy": "stratified_by_duration_std",
+  "min_clips_threshold": 50,
+  "dataset": "openslr/librispeech_asr train.100"
+}
