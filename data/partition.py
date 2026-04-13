@@ -6,6 +6,11 @@ Validates that the partition is correct, complete, and PII-free.
 Saves data/partition_manifest.json as the authoritative record of
 what data is available for FL simulation.
 
+Feature format expected (Wav2Vec2-compatible):
+  dtype  = torch.float32
+  shape  = (T_samples,)  1D variable-length raw waveform
+  values = [-1, 1] (peak-normalized)
+
 This script does NOT move or copy data. It reads and validates only.
 
 Run:
@@ -24,16 +29,16 @@ import torch
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-NODES_DIR      = "data/nodes"
-MANIFEST_FILE  = "data/partition_manifest.json"
+NODES_DIR = "data/nodes"
+MANIFEST_FILE = "data/partition_manifest.json"
+SAMPLE_RATE = 16000
 
 FEATURE_CONFIG = {
-    "n_mels":       80,
-    "n_fft":        400,
-    "hop_length":   160,
-    "sample_rate":  16000,
-    "f_min":        0.0,
-    "f_max":        8000.0,
+    "format": "raw_waveform_float32_1d",
+    "sample_rate": SAMPLE_RATE,
+    "normalized": True,
+    "model_compatibility": "facebook/wav2vec2-base-960h",
+    "notes": "1D (T_samples,) tensors; Wav2Vec2Processor handles padding at batch time",
 }
 
 
@@ -43,67 +48,67 @@ FEATURE_CONFIG = {
 def validate_node(node_id: str) -> dict:
     """
     Validates one node directory and returns its statistics.
+    Expects 1D float32 raw waveform tensors (Wav2Vec2-compatible).
     Raises AssertionError on any violation.
     """
-    node_dir   = os.path.join(NODES_DIR, node_id)
-    feat_path  = os.path.join(node_dir, "features.pt")
+    node_dir = os.path.join(NODES_DIR, node_id)
+    feat_path = os.path.join(node_dir, "features.pt")
     label_path = os.path.join(node_dir, "labels.txt")
-    meta_path  = os.path.join(node_dir, "metadata.json")
-    pkl_path   = os.path.join(node_dir, "raw_clips.pkl")
+    meta_path = os.path.join(node_dir, "metadata.json")
+    pkl_path = os.path.join(node_dir, "raw_clips.pkl")
 
-    # Must not have raw_clips.pkl
     assert not os.path.exists(pkl_path), (
         f"{node_id}: raw_clips.pkl still exists — run features.py to delete it"
     )
 
-    # features.pt
     assert os.path.exists(feat_path), f"{node_id}: features.pt missing"
     features = torch.load(feat_path, weights_only=True)
-    assert isinstance(features, list),  f"{node_id}: features.pt is not a list"
-    assert len(features) >= 50,          f"{node_id}: only {len(features)} clips — minimum 50 required"
+    assert isinstance(features, list), f"{node_id}: features.pt is not a list"
+    assert len(features) >= 50, f"{node_id}: only {len(features)} clips — minimum 50 required"
 
-    T_values    = []
-    dur_values  = []   # approximate via T * hop_length / sample_rate
+    dur_values = []
 
     for i, t in enumerate(features):
-        assert isinstance(t, torch.Tensor),  f"{node_id} clip {i}: not a tensor"
-        assert t.dtype == torch.float32,      f"{node_id} clip {i}: dtype {t.dtype}"
-        assert t.ndim == 2,                   f"{node_id} clip {i}: ndim {t.ndim}"
-        assert t.shape[1] == 80,              f"{node_id} clip {i}: mel bins {t.shape[1]}"
-        T_values.append(t.shape[0])
-        dur_values.append(t.shape[0] * FEATURE_CONFIG["hop_length"] / FEATURE_CONFIG["sample_rate"])
+        assert isinstance(t, torch.Tensor), f"{node_id} clip {i}: not a tensor"
+        assert t.dtype == torch.float32, f"{node_id} clip {i}: dtype {t.dtype}"
+        assert t.ndim == 1, (
+            f"{node_id} clip {i}: ndim {t.ndim} — expected 1D raw waveform"
+        )
+        assert t.shape[0] > 0, f"{node_id} clip {i}: empty waveform tensor"
+        # Values should be in [-1.1, 1.1] after peak normalization
+        max_val = float(t.abs().max())
+        assert max_val <= 1.1, (
+            f"{node_id} clip {i}: max abs value {max_val:.3f} > 1.1 — not normalized"
+        )
+        dur_values.append(t.shape[0] / SAMPLE_RATE)
 
-    # labels.txt
     assert os.path.exists(label_path), f"{node_id}: labels.txt missing"
     with open(label_path, encoding="utf-8") as f:
-        labels = f.read().strip().split("\n")
+        labels = [ln for ln in f.read().strip().split("\n") if ln]
     assert len(labels) == len(features), (
         f"{node_id}: label count {len(labels)} != feature count {len(features)}"
     )
 
-    # metadata.json
     assert os.path.exists(meta_path), f"{node_id}: metadata.json missing"
     with open(meta_path) as f:
         meta = json.load(f)
     assert "speaker_id" not in meta, f"{node_id}: speaker_id in metadata.json — PII leak!"
 
     total_dur_s = sum(dur_values)
-    mean_dur_s  = total_dur_s / len(dur_values)
-    std_dur_s   = math.sqrt(sum((d - mean_dur_s) ** 2 for d in dur_values) / len(dur_values))
-    mean_T      = sum(T_values) / len(T_values)
+    mean_dur_s = total_dur_s / len(dur_values)
+    std_dur_s = math.sqrt(sum((d - mean_dur_s) ** 2 for d in dur_values) / len(dur_values))
 
     return {
-        "node_id":             node_id,
-        "clip_count":          len(features),
-        "total_duration_s":    round(total_dur_s, 3),
+        "node_id": node_id,
+        "clip_count": len(features),
+        "total_duration_s": round(total_dur_s, 3),
         "mean_clip_duration_s": round(mean_dur_s, 3),
-        "std_clip_duration_s":  round(std_dur_s, 3),
-        "min_T":               min(T_values),
-        "max_T":               max(T_values),
-        "mean_T":              round(mean_T, 1),
-        "features_path":       feat_path,
-        "labels_path":         label_path,
-        "_labels":             labels,   # kept in memory for richness computation, not in manifest
+        "std_clip_duration_s": round(std_dur_s, 3),
+        "min_duration_s": round(min(dur_values), 3),
+        "max_duration_s": round(max(dur_values), 3),
+        "features_path": feat_path,
+        "labels_path": label_path,
+        "_labels": labels,
     }
 
 
@@ -128,19 +133,20 @@ def compute_vocab_richness(labels: list[str]) -> float:
 # Step 3 — Save manifest
 # ---------------------------------------------------------------------------
 def save_manifest(node_stats: list[dict], total_clips: int, total_dur_s: float):
-    nodes_for_manifest = []
-    for s in node_stats:
-        entry = {k: v for k, v in s.items() if k != "_labels"}
-        nodes_for_manifest.append(entry)
+    nodes_for_manifest = [
+        {k: v for k, v in s.items() if k != "_labels"}
+        for s in node_stats
+    ]
 
     manifest = {
-        "n_nodes":            len(node_stats),
-        "total_clips":        total_clips,
+        "n_nodes": len(node_stats),
+        "total_clips": total_clips,
         "total_duration_hours": round(total_dur_s / 3600, 4),
-        "nodes":              nodes_for_manifest,
-        "feature_config":     FEATURE_CONFIG,
-        "pii_status":         "verified_clean",
-        "ready_for_fl":       True,
+        "nodes": nodes_for_manifest,
+        "feature_config": FEATURE_CONFIG,
+        "pii_status": "verified_clean",
+        "ready_for_fl": True,
+        "maml_ready": True,
     }
 
     with open(MANIFEST_FILE, "w") as f:
@@ -173,7 +179,7 @@ def print_readiness_table(node_stats: list[dict], total_clips: int, total_dur_s:
             f"│ {s['node_id']:<{col_w[0]}} │"
             f" {s['clip_count']:>{col_w[1]}} │"
             f" {dur_min:>{col_w[2]-3}.1f} min │"
-            f" {s['mean_T']:>{col_w[3]}.0f} │"
+            f" {s['mean_clip_duration_s']:>{col_w[3]}.1f}s │"
             f" {s['vocabulary_richness']:>{col_w[4]-3}.4f}     │"
         )
         print(row)
@@ -183,7 +189,9 @@ def print_readiness_table(node_stats: list[dict], total_clips: int, total_dur_s:
     print(f"Total: {len(node_stats)} nodes, {total_clips:,} clips, "
           f"{total_dur_s/3600:.2f} hours audio")
     print("PII status: CLEAN — no raw audio, no speaker identity in any artifact")
+    print("Feature format: raw float32 waveform, 1D, variable length, 16kHz")
     print("Ready for FL simulation: YES")
+    print("Ready for MAML: YES")
     print()
 
 
@@ -256,7 +264,7 @@ def main():
 
     print("=" * 60)
     print("Partition validation complete.")
-    print("Next step: python data/generate_report.py")
+    print("Next step: python data/task_sampler.py  (verify sampler)")
     print("=" * 60)
 
 

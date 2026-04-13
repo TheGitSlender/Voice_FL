@@ -1,0 +1,45 @@
+# configs/dev.yaml — Development configuration
+# Hardware: RTX 4070 Super (12GB VRAM)
+# MAML mode: FOMAML (first-order, fits in 12GB)
+# DP: disabled (enable in configs/experiment.yaml for full run)
+# BAE: disabled (enable in Phase 6 integration)
+
+maml:
+  mode: fomaml          # first-order MAML — RTX 4070 Super compatible
+  k: 3                  # inner loop steps
+  inner_lr: 1.0e-4      # α
+  outer_lr: 2.0e-4      # β
+  support_size: 8       # K clips per task
+  query_size: 8         # Q clips per task
+  adaptation_mode: anil # lm_head only inner loop (I7)
+
+federated:
+  num_nodes: 20
+  cohort_fraction: 0.1  # 2 nodes per round
+  num_rounds: 50
+
+privacy:
+  enabled: false        # start without DP — validate MAML first
+  epsilon: 8.0
+  delta: 1.0e-5
+  C: 1.0                # L2 clipping threshold
+
+model:
+  name: facebook/wav2vec2-base-960h
+  mode: anil
+
+data:
+  n_nodes: 20
+  node_dir: data/nodes/
+
+hardware:
+  device: cuda
+  use_bf16: true
+  gpu_per_client: 0.5   # VCE shares GPU across simulated clients
+
+bae:
+  enabled: false        # enable after Phase 5 privacy gate passes
+
+mlflow:
+  experiment_name: voicefl_maml_dev
+  tracking_uri: ./mlruns

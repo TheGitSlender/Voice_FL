@@ -1,0 +1,26 @@
+# VoiceFL server image
+# Server has no GPU requirement — runs on CPU only
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY models/     ./models/
+COPY maml/       ./maml/
+COPY federated/  ./federated/
+COPY configs/    ./configs/
+
+VOLUME ["/checkpoints"]
+
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8080
+
+CMD ["python", "federated/server_maml.py", "--config", "configs/poc.yaml"]

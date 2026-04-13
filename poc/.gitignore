@@ -1,0 +1,53 @@
+# Data — never commit audio or node artifacts
+data/nodes/
+data/salt.txt
+data/*.pkl
+data/*.lock
+data/speaker_selection.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/data/
+
+# Checkpoints
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# HuggingFace cache
+~/.cache/huggingface/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+.docker/
+
+# OS
+.DS_Store
+Thumbs.db

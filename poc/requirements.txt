@@ -1,0 +1,17 @@
+torch>=2.1.0
+torchaudio>=2.1.0
+# transformers 4.39 introduced torch.utils._pytree.register_pytree_node usage,
+# which was removed in torch 2.5+. Pin below that to work with any torch >= 2.1.
+transformers>=4.35.0,<4.39.0
+datasets>=2.14.0,<3.0.0
+flwr>=1.2.0,<2.0.0
+# learn2learn removed: Cython extension fails on Python 3.10+/3.13+ inside Docker.
+# FOMAML is implemented natively via copy.deepcopy + manual grad propagation
+# in maml/engine.py — no learn2learn dependency at runtime.
+numpy>=1.24.0
+PyYAML>=6.0
+jiwer>=3.0.0
+soundfile>=0.12.1
+librosa>=0.10.0
+grpcio>=1.59.0
+grpcio-tools>=1.59.0

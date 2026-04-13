@@ -1,27 +1,30 @@
 """
-data/features.py — S2b: Log-Mel Feature Extraction
+data/features.py — S2b: Raw Waveform Normalization (Wav2Vec2-compatible)
 
-Converts per-node raw audio clips (raw_clips.pkl) to log-mel filterbank
-features and permanently deletes the raw waveforms.
+Converts per-node raw audio clips (raw_clips.pkl) to normalized float32
+waveform tensors and permanently deletes the raw waveforms.
 
-This is the critical privacy step: after this file runs, no waveform data
-remains on disk anywhere under data/nodes/.
+Wav2Vec2 takes raw waveforms directly — NOT log-mel spectrograms.
+The Wav2Vec2Processor handles any required preprocessing internally during
+model forward passes.
 
-Feature format (fixed for entire project):
-  n_mels     = 80
-  n_fft      = 400   (25ms window at 16 kHz)
-  hop_length = 160   (10ms hop at 16 kHz)
-  f_min      = 0.0
-  f_max      = 8000.0
+Feature format:
   dtype      = torch.float32
-  shape      = (T, 80)  where T varies by clip duration
+  shape      = (T_samples,)  1D, where T_samples = clip_duration_s * 16000
+  values     = [-1, 1]  (peak-normalized per clip)
+  sample_rate = 16000 Hz (LibriSpeech native — no resampling needed)
 
 Output per node:
-  data/nodes/node_XXX/features.pt  — list of (T_i, 80) float32 tensors
-  data/nodes/node_XXX/labels.txt   — transcriptions, one per line
+  data/nodes/node_XXX/features.pt  — list of (T_i,) float32 tensors
+  data/nodes/node_XXX/labels.txt   — UPPERCASE transcriptions, one per line
 
 Deletes:
   data/nodes/node_XXX/raw_clips.pkl  — MUST be deleted; verified before next node
+
+Privacy note (I1): after this script completes, no waveform data remains
+on disk anywhere under data/nodes/. The model will compute its own internal
+representations (CNN feature extractor + transformer encoder) from these
+normalized tensors at training time.
 
 Run:
     python data/features.py
@@ -31,32 +34,19 @@ Requires:
 """
 
 import json
-import math
 import os
 import pickle
+from typing import List
 
-import librosa
 import numpy as np
 import torch
 from tqdm import tqdm
 
-# ---------------------------------------------------------------------------
-# Feature extraction parameters — FIXED, do not change
-# ---------------------------------------------------------------------------
-N_MELS      = 80
-N_FFT       = 400    # 25ms at 16kHz
-HOP_LENGTH  = 160    # 10ms at 16kHz
 SAMPLE_RATE = 16000
-F_MIN       = 0.0
-F_MAX       = 8000.0
-
-NODES_DIR   = "data/nodes"
+NODES_DIR = "data/nodes"
 CONFIG_FILE = "data/cleaning_config.json"
 
 
-# ---------------------------------------------------------------------------
-# Load cleaning config
-# ---------------------------------------------------------------------------
 def load_cleaning_config() -> dict:
     if not os.path.exists(CONFIG_FILE):
         return {"normalize_audio": True}
@@ -64,57 +54,28 @@ def load_cleaning_config() -> dict:
         return json.load(f)
 
 
-# ---------------------------------------------------------------------------
-# Step 2 — Feature extraction per clip
-# ---------------------------------------------------------------------------
-def extract_log_mel(audio: np.ndarray, normalize: bool) -> torch.Tensor:
-    """
-    Extract log-mel filterbank features from a raw audio array.
-
-    Args:
-        audio:     float32 numpy array, expected at 16 kHz
-        normalize: if True, normalize audio to [-1, 1] before extraction
-
-    Returns:
-        torch.float32 tensor of shape (T, 80)
-    """
+def normalize_waveform(audio: np.ndarray) -> np.ndarray:
+    """Peak-normalize audio to [-1, 1]. Returns float32."""
     audio = audio.astype(np.float32)
-
-    # Resample if needed (LibriSpeech is always 16kHz, but be safe)
-    # librosa.resample is only called if sampling rate differs — the
-    # raw_clips.pkl only stores arrays, not sampling rate. We trust the
-    # dataset guarantee: LibriSpeech is uniformly 16 kHz.
-
-    if normalize:
-        max_val = np.max(np.abs(audio))
-        if max_val > 0:
-            audio = audio / (max_val + 1e-8)
-
-    mel = librosa.feature.melspectrogram(
-        y=audio,
-        sr=SAMPLE_RATE,
-        n_mels=N_MELS,
-        n_fft=N_FFT,
-        hop_length=HOP_LENGTH,
-        fmin=F_MIN,
-        fmax=F_MAX,
-    )
-    log_mel = librosa.power_to_db(mel, ref=np.max)  # shape: (80, T)
-    log_mel = log_mel.T                              # shape: (T, 80) — time-first
-    return torch.tensor(log_mel, dtype=torch.float32)
+    peak = np.max(np.abs(audio))
+    if peak > 0:
+        audio = audio / (peak + 1e-8)
+    return audio
 
 
-# ---------------------------------------------------------------------------
-# Step 1+3+4+5 — Process one node
-# ---------------------------------------------------------------------------
 def process_node(node_id: str, normalize: bool) -> dict:
     """
-    Load raw_clips.pkl, extract features, save outputs, delete pkl.
+    Load raw_clips.pkl, save raw waveform tensors, delete pkl.
+
+    Each clip is saved as a 1D (T_samples,) float32 tensor.
+    Labels are saved as UPPERCASE text (Wav2Vec2 trained on uppercase).
+    raw_clips.pkl is permanently deleted after saving — verified with assert.
+
     Returns per-node statistics dict.
     """
-    node_dir   = os.path.join(NODES_DIR, node_id)
-    pkl_path   = os.path.join(node_dir, "raw_clips.pkl")
-    feat_path  = os.path.join(node_dir, "features.pt")
+    node_dir = os.path.join(NODES_DIR, node_id)
+    pkl_path = os.path.join(node_dir, "raw_clips.pkl")
+    feat_path = os.path.join(node_dir, "features.pt")
     label_path = os.path.join(node_dir, "labels.txt")
 
     if not os.path.exists(pkl_path):
@@ -122,137 +83,136 @@ def process_node(node_id: str, normalize: bool) -> dict:
             f"{pkl_path} not found. Run: python data/pii_masking.py first."
         )
 
-    # Load raw clips
     with open(pkl_path, "rb") as f:
         clips = pickle.load(f)
 
-    n_clips   = len(clips)
-    features  = []
-    labels    = []
-    T_values  = []
+    features: List[torch.Tensor] = []
+    labels: List[str] = []
+    duration_values: List[float] = []
 
     for clip in tqdm(clips, desc=f"{node_id}", leave=False):
-        audio = clip["audio"]
-        text  = clip["text"]
+        audio: np.ndarray = clip["audio"]
+        text: str = clip["text"]
 
-        tensor = extract_log_mel(audio, normalize=normalize)
+        if normalize:
+            audio = normalize_waveform(audio)
+        else:
+            audio = audio.astype(np.float32)
+
+        # Wav2Vec2 expects raw waveform as 1D float32 tensor at 16kHz
+        tensor = torch.tensor(audio, dtype=torch.float32)  # shape: (T_samples,)
         features.append(tensor)
-        labels.append(text)
-        T_values.append(tensor.shape[0])
+        labels.append(text.upper())  # Wav2Vec2 trained on uppercase
+        duration_values.append(len(audio) / SAMPLE_RATE)
 
-    # Step 3 — Save features.pt (list of variable-length tensors — do NOT pad/stack)
+    # Save variable-length list — do NOT pad or stack
     torch.save(features, feat_path)
 
-    # Save labels.txt (one transcription per line, same order as features)
     with open(label_path, "w", encoding="utf-8") as f:
         f.write("\n".join(labels))
 
-    # Step 4 — Delete raw waveform file (NON-NEGOTIABLE)
+    # I1: Delete raw waveform file — non-negotiable privacy step
     os.remove(pkl_path)
     assert not os.path.exists(pkl_path), f"BUG: failed to delete {pkl_path}"
 
     return {
-        "node_id":  node_id,
-        "n_clips":  n_clips,
-        "T_min":    min(T_values),
-        "T_max":    max(T_values),
-        "T_mean":   sum(T_values) / len(T_values),
+        "node_id": node_id,
+        "n_clips": len(clips),
+        "dur_min_s": round(min(duration_values), 2),
+        "dur_max_s": round(max(duration_values), 2),
+        "dur_mean_s": round(sum(duration_values) / len(duration_values), 2),
     }
 
 
-# ---------------------------------------------------------------------------
-# Step 5 — Verify one node's output
-# ---------------------------------------------------------------------------
 def verify_node(node_id: str) -> None:
-    node_dir   = os.path.join(NODES_DIR, node_id)
-    feat_path  = os.path.join(node_dir, "features.pt")
+    """Verify saved tensors are 1D float32 and pkl is gone."""
+    node_dir = os.path.join(NODES_DIR, node_id)
+    feat_path = os.path.join(node_dir, "features.pt")
     label_path = os.path.join(node_dir, "labels.txt")
-    pkl_path   = os.path.join(node_dir, "raw_clips.pkl")
+    pkl_path = os.path.join(node_dir, "raw_clips.pkl")
 
     features = torch.load(feat_path, weights_only=True)
-    assert isinstance(features, list),   "features.pt must be a list"
-    assert len(features) > 0,            "Empty features list"
+    assert isinstance(features, list), "features.pt must be a list"
+    assert len(features) > 0, "Empty features list"
 
     for i, t in enumerate(features):
-        assert isinstance(t, torch.Tensor),     f"clip {i}: not a tensor"
-        assert t.dtype == torch.float32,         f"clip {i}: wrong dtype {t.dtype}"
-        assert t.ndim == 2,                      f"clip {i}: wrong ndim {t.ndim}"
-        assert t.shape[1] == N_MELS,             f"clip {i}: wrong mel bins {t.shape[1]}"
+        assert isinstance(t, torch.Tensor), f"clip {i}: not a tensor"
+        assert t.dtype == torch.float32, f"clip {i}: wrong dtype {t.dtype}"
+        assert t.ndim == 1, f"clip {i}: wrong ndim {t.ndim} (expected 1D)"
+        assert t.shape[0] > 0, f"clip {i}: empty waveform"
 
     with open(label_path, encoding="utf-8") as f:
-        label_lines = f.read().strip().split("\n")
+        label_lines = [ln for ln in f.read().strip().split("\n") if ln]
     assert len(label_lines) == len(features), (
         f"Label count {len(label_lines)} != feature count {len(features)}"
     )
 
-    assert not os.path.exists(pkl_path), f"BUG: raw_clips.pkl still exists at {pkl_path}"
+    assert not os.path.exists(pkl_path), (
+        f"BUG: raw_clips.pkl still exists at {pkl_path}"
+    )
 
 
-# ---------------------------------------------------------------------------
-# Step 6 — Final verification: no pkl files remain
-# ---------------------------------------------------------------------------
-def final_verification(node_ids: list[str]) -> tuple[int, float]:
+def final_verification(node_ids: List[str]) -> None:
     print("=" * 60)
-    print("STEP 6 — Final verification")
+    print("Final verification — no .pkl files remain")
     print("=" * 60)
 
-    # Check no .pkl files anywhere under data/nodes/
     for root, _, files in os.walk(NODES_DIR):
         for fname in files:
             if fname.endswith(".pkl"):
                 raise RuntimeError(
-                    f"BUG: .pkl file found after extraction: {os.path.join(root, fname)}"
+                    f"BUG: .pkl file found: {os.path.join(root, fname)}"
                 )
 
-    total_clips    = 0
-    total_duration = 0.0
+    total_clips = 0
+    total_duration_s = 0.0
 
-    print(f"{'Node':<12} {'Clips':>7} {'T min':>7} {'T max':>7} {'T mean':>8}")
-    print("-" * 45)
+    print(f"{'Node':<12} {'Clips':>7} {'Dur min':>9} {'Dur max':>9} {'Dur mean':>10}")
+    print("-" * 52)
 
     for node_id in sorted(node_ids):
-        node_dir   = os.path.join(NODES_DIR, node_id)
-        feat_path  = os.path.join(node_dir, "features.pt")
-        meta_path  = os.path.join(node_dir, "metadata.json")
+        node_dir = os.path.join(NODES_DIR, node_id)
+        feat_path = os.path.join(node_dir, "features.pt")
+        meta_path = os.path.join(node_dir, "metadata.json")
 
         features = torch.load(feat_path, weights_only=True)
-        T_values = [t.shape[0] for t in features]
+        durations = [t.shape[0] / SAMPLE_RATE for t in features]
 
         with open(meta_path) as f:
             meta = json.load(f)
 
-        total_clips    += len(features)
-        total_duration += meta.get("total_duration_s", 0.0)
+        total_clips += len(features)
+        total_duration_s += meta.get("total_duration_s", sum(durations))
 
         print(
             f"{node_id:<12} {len(features):>7} "
-            f"{min(T_values):>7} {max(T_values):>7} "
-            f"{sum(T_values)/len(T_values):>8.1f}"
+            f"{min(durations):>8.1f}s "
+            f"{max(durations):>8.1f}s "
+            f"{sum(durations)/len(durations):>9.1f}s"
         )
 
     print()
     print(f"No .pkl files remain under {NODES_DIR}/  ✓")
-    print(f"Total clips processed: {total_clips:,}")
-    print(f"Total audio processed: {total_duration/3600:.2f} hours")
-    return total_clips, total_duration
+    print(f"Feature format: raw float32 waveform, variable length, 16kHz  ✓")
+    print(f"Total clips: {total_clips:,}")
+    print(f"Total audio: {total_duration_s / 3600:.2f} hours")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-def main():
+def main() -> None:
     print()
-    print("VoiceFL — Phase 1 / S2b: Log-Mel Feature Extraction")
+    print("VoiceFL-MAML — Phase 1 / S2b: Raw Waveform Normalization")
+    print("(Wav2Vec2 takes raw audio — no mel spectrograms)")
     print()
 
-    cfg       = load_cleaning_config()
+    cfg = load_cleaning_config()
     normalize = cfg.get("normalize_audio", True)
     print(f"normalize_audio: {normalize}")
     print()
 
-    # Discover nodes by looking for raw_clips.pkl
     if not os.path.isdir(NODES_DIR):
-        raise RuntimeError(f"{NODES_DIR} not found. Run: python data/pii_masking.py first.")
+        raise RuntimeError(
+            f"{NODES_DIR} not found. Run: python data/pii_masking.py first."
+        )
 
     node_dirs = sorted([
         d for d in os.listdir(NODES_DIR)
@@ -269,7 +229,7 @@ def main():
     print(f"Found {len(node_dirs)} nodes to process: {', '.join(node_dirs)}")
     print()
     print("=" * 60)
-    print("STEP 1–5 — Processing nodes (load → extract → save → delete pkl)")
+    print("Processing nodes (load → normalize → save 1D tensors → delete pkl)")
     print("=" * 60)
 
     stats = []
@@ -279,7 +239,8 @@ def main():
         stats.append(node_stats)
         print(
             f"  {node_id}: {node_stats['n_clips']} clips, "
-            f"T ∈ [{node_stats['T_min']}, {node_stats['T_max']}], pkl deleted ✓"
+            f"dur ∈ [{node_stats['dur_min_s']}, {node_stats['dur_max_s']}]s, "
+            f"pkl deleted ✓"
         )
 
     print()

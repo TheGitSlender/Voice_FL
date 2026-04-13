@@ -1,0 +1,16 @@
+data/nodes/
+data/salt.txt
+data/*.pkl
+checkpoints/
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+notebooks/data/
+*.log
+logs/
+.venv/
+venv/
+.DS_Store

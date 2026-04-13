@@ -1,0 +1,29 @@
+# VoiceFL-MAML PoC configuration
+# Hardware: RTX 4070 Super, 12GB VRAM, 32GB RAM
+
+device: cuda  # set to "cpu" for CPU-only testing
+
+maml:
+  inner_steps: 3        # k — inner loop adaptation steps
+  inner_lr: 0.0001      # α
+  outer_lr: 0.0002      # β
+  support_size: 8       # K
+  query_size: 8         # Q
+  mode: fomaml          # fomaml only in PoC
+
+federated:
+  rounds: 20
+  fraction_fit: 1.0     # all 5 nodes participate every round
+  min_available_clients: 5
+  port: 8080
+
+node:
+  server_address: "server:8080"
+  device: cuda
+  nodes_dir: /data      # Docker mount; use data/nodes/ for local runs
+
+evaluation:
+  n_tasks: 5            # episodes per node for WER evaluation
+  federation_tolerance: 0.15  # Criterion 2: 15% relative WER difference
+
+checkpoint_dir: checkpoints/federated

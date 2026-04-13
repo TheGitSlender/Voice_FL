@@ -1,0 +1,46 @@
+# configs/experiment.yaml — Full experiment configuration
+# Hardware: Lightning AI A100 (80GB VRAM)
+# MAML mode: full second-order MAML (requires A100 for Wav2Vec2)
+# DP: enabled (ε=4.0, δ=1e-5)
+# BAE: enabled
+
+maml:
+  mode: full            # second-order MAML via higher — requires A100
+  k: 3                  # inner loop steps
+  inner_lr: 1.0e-4      # α
+  outer_lr: 2.0e-4      # β
+  support_size: 8       # K clips per task
+  query_size: 8         # Q clips per task
+  adaptation_mode: anil # lm_head only inner loop (I7)
+
+federated:
+  num_nodes: 20
+  cohort_fraction: 0.1  # 2 nodes per round
+  num_rounds: 100
+
+privacy:
+  enabled: true         # manual DP via privacy/dp_meta.py (no Opacus — I5)
+  epsilon: 4.0          # target ε (production target)
+  delta: 1.0e-5
+  C: 1.0                # L2 clipping threshold
+  # sigma computed automatically from ε, δ via autodp
+
+model:
+  name: facebook/wav2vec2-base-960h
+  mode: anil
+
+data:
+  n_nodes: 20
+  node_dir: data/nodes/
+
+hardware:
+  device: cuda
+  use_bf16: true
+  gpu_per_client: 1.0   # A100 — each client gets full GPU
+
+bae:
+  enabled: true         # Byzantine anomaly detection active
+
+mlflow:
+  experiment_name: voicefl_maml_experiment
+  tracking_uri: ./mlruns

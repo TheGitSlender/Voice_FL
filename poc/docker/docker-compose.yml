@@ -1,0 +1,126 @@
+version: "3.9"
+
+# VoiceFL-MAML PoC — 5 nodes + 1 server
+# Each node mounts its own speaker data volume; no cross-node data access.
+# Server has no data volumes — receives only meta-gradients over gRPC.
+#
+# Usage:
+#   docker-compose up                        # full 20-round run
+#   NUM_ROUNDS=5 docker-compose up           # smoke test (5 rounds)
+#
+# Requires:
+#   - nvidia-docker2 runtime
+#   - data/nodes/ populated (run the data pipeline first)
+#   - data/speaker_selection.json to know the node hashes
+
+networks:
+  voicefl-net:
+    driver: bridge
+
+x-node-base: &node-base
+  image: voicefl-node
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.node
+  networks:
+    - voicefl-net
+  depends_on:
+    server:
+      condition: service_started
+  environment:
+    - PYTHONUNBUFFERED=1
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+  restart: "no"
+
+services:
+  server:
+    image: voicefl-server
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    networks:
+      - voicefl-net
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../checkpoints/federated:/app/checkpoints/federated
+      - ../checkpoints/centralized:/app/checkpoints/centralized:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NUM_ROUNDS=${NUM_ROUNDS:-20}
+    command: >
+      python federated/server_maml.py
+        --config configs/poc.yaml
+        --rounds ${NUM_ROUNDS:-20}
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Replace NODE_HASH_1..5 with actual hashes from data/speaker_selection.json
+  # The build.sh script generates a resolved docker-compose.resolved.yml
+  # ---------------------------------------------------------------------------
+
+  node1:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SPEAKER_HASH=${NODE_HASH_1}
+    volumes:
+      - type: bind
+        source: ../data/nodes/${NODE_HASH_1}
+        target: /data
+        read_only: true
+      - ../checkpoints/nodes/node1:/checkpoints
+
+  node2:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SPEAKER_HASH=${NODE_HASH_2}
+    volumes:
+      - type: bind
+        source: ../data/nodes/${NODE_HASH_2}
+        target: /data
+        read_only: true
+      - ../checkpoints/nodes/node2:/checkpoints
+
+  node3:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SPEAKER_HASH=${NODE_HASH_3}
+    volumes:
+      - type: bind
+        source: ../data/nodes/${NODE_HASH_3}
+        target: /data
+        read_only: true
+      - ../checkpoints/nodes/node3:/checkpoints
+
+  node4:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SPEAKER_HASH=${NODE_HASH_4}
+    volumes:
+      - type: bind
+        source: ../data/nodes/${NODE_HASH_4}
+        target: /data
+        read_only: true
+      - ../checkpoints/nodes/node4:/checkpoints
+
+  node5:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SPEAKER_HASH=${NODE_HASH_5}
+    volumes:
+      - type: bind
+        source: ../data/nodes/${NODE_HASH_5}
+        target: /data
+        read_only: true
+      - ../checkpoints/nodes/node5:/checkpoints

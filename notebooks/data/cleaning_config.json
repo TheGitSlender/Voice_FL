@@ -1,0 +1,7 @@
+{
+  "min_duration_s": 1.0,
+  "max_duration_s": 30.0,
+  "max_silence_fraction": 0.5,
+  "normalize_audio": true,
+  "truncate_long_clips": false
+}
