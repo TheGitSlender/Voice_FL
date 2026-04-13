@@ -50,6 +50,8 @@ def load_config(path: str | None) -> dict:
         "device": "cpu",
         "inner_steps": 3,
         "inner_lr": 1e-4,
+        "eval_inner_steps": 10,   # k at eval time (matches meta_train.py gate)
+        "eval_inner_lr": 1e-3,    # α at eval time — needs to recover from std=0.3 noise
         "support_size": 8,
         "query_size": 8,
         "nodes_dir": str(ROOT / "data" / "nodes"),
@@ -158,7 +160,7 @@ def evaluate_adaptation(model, processor, samplers, cfg, device) -> tuple[int, l
                 model, processor,
                 task.support_audio, task.support_labels,
                 task.query_audio, task.query_labels,
-                cfg["inner_steps"], cfg["inner_lr"], device,
+                cfg["eval_inner_steps"], cfg["eval_inner_lr"], device,
             )
             wer0_list.append(w0)
             wer3_list.append(w3)
@@ -202,16 +204,20 @@ def evaluate_federation(
 
     mean_fed = sum(fed_wers) / len(fed_wers)
     mean_cen = sum(cen_wers) / len(cen_wers)
+    # Criterion 2 is one-directional: federated may be AT MOST 15% WORSE than
+    # centralized.  If federated is better (lower WER), that is a pass — the
+    # abs() formulation incorrectly failed when federated outperformed centralized.
     if mean_cen > 0:
-        relative_diff = abs(mean_fed - mean_cen) / mean_cen
+        relative_diff = (mean_fed - mean_cen) / mean_cen   # positive = fed is worse
     else:
         relative_diff = 0.0
 
     ok = relative_diff <= 0.15
+    direction = "worse" if relative_diff > 0 else "better"
     check(
         f"Criterion 2: federated WER={mean_fed:.3f} vs centralized WER={mean_cen:.3f}",
         ok,
-        f"diff={relative_diff:.1%} (limit 15%)",
+        f"fed is {abs(relative_diff):.1%} {direction} (limit 15% worse)",
     )
     return ok
 

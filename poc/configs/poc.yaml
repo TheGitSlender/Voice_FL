@@ -24,6 +24,8 @@ node:
 
 evaluation:
   n_tasks: 5            # episodes per node for WER evaluation
-  federation_tolerance: 0.15  # Criterion 2: 15% relative WER difference
+  federation_tolerance: 0.15  # Criterion 2: federated may be at most 15% worse
+  eval_inner_steps: 10  # k for WER evaluation (more than training for clear signal)
+  eval_inner_lr: 0.001  # α for WER evaluation (must recover from std=0.3 noise in k steps)
 
 checkpoint_dir: checkpoints/federated
