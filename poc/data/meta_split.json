@@ -1,0 +1,119 @@
+{
+  "meta_train": [
+    "f57d8cef9ffb7ffb",
+    "704a5e18650ca9d4",
+    "6392e88f47bbb147",
+    "b30bc9c0e0c18e9f",
+    "c8d564d9e569af3b",
+    "839e5337fd8322cd",
+    "a9486bbdcc10f5d2",
+    "f22b894ff6b722d0",
+    "1ff600de9673536e",
+    "0b76a786e8b9ca45",
+    "6be03b2b3e139231",
+    "c2775bf053dd0443"
+  ],
+  "meta_val": [
+    "be51bbdbe0fe847a",
+    "95fabe82cd5a151c",
+    "8e6fc8a53f42388d",
+    "2573e9ef8aa9401e"
+  ],
+  "meta_test": [
+    "0f335072a9eb4388",
+    "f12ee4cfd8e47b73",
+    "8c4e9a95a3196308",
+    "0395d231c626325e"
+  ],
+  "dataset": "librispeech_asr_clean",
+  "splits_used": [
+    "test",
+    "validation"
+  ],
+  "total_speakers": 20,
+  "split": "12/4/4",
+  "split_rationale": "meta-test locked before any training decisions; fewest clips = hardest speakers",
+  "min_clips_threshold": 40,
+  "speaker_stats": {
+    "f57d8cef9ffb7ffb": {
+      "clip_count": 108,
+      "source_split": "test"
+    },
+    "704a5e18650ca9d4": {
+      "clip_count": 105,
+      "source_split": "test"
+    },
+    "6392e88f47bbb147": {
+      "clip_count": 104,
+      "source_split": "test"
+    },
+    "b30bc9c0e0c18e9f": {
+      "clip_count": 102,
+      "source_split": "test"
+    },
+    "c8d564d9e569af3b": {
+      "clip_count": 101,
+      "source_split": "validation"
+    },
+    "839e5337fd8322cd": {
+      "clip_count": 96,
+      "source_split": "validation"
+    },
+    "a9486bbdcc10f5d2": {
+      "clip_count": 95,
+      "source_split": "validation"
+    },
+    "f22b894ff6b722d0": {
+      "clip_count": 94,
+      "source_split": "validation"
+    },
+    "1ff600de9673536e": {
+      "clip_count": 91,
+      "source_split": "test"
+    },
+    "0b76a786e8b9ca45": {
+      "clip_count": 90,
+      "source_split": "test"
+    },
+    "6be03b2b3e139231": {
+      "clip_count": 90,
+      "source_split": "validation"
+    },
+    "c2775bf053dd0443": {
+      "clip_count": 88,
+      "source_split": "test"
+    },
+    "be51bbdbe0fe847a": {
+      "clip_count": 87,
+      "source_split": "validation"
+    },
+    "95fabe82cd5a151c": {
+      "clip_count": 83,
+      "source_split": "validation"
+    },
+    "8e6fc8a53f42388d": {
+      "clip_count": 82,
+      "source_split": "test"
+    },
+    "2573e9ef8aa9401e": {
+      "clip_count": 82,
+      "source_split": "validation"
+    },
+    "0f335072a9eb4388": {
+      "clip_count": 80,
+      "source_split": "validation"
+    },
+    "f12ee4cfd8e47b73": {
+      "clip_count": 78,
+      "source_split": "validation"
+    },
+    "8c4e9a95a3196308": {
+      "clip_count": 78,
+      "source_split": "test"
+    },
+    "0395d231c626325e": {
+      "clip_count": 78,
+      "source_split": "validation"
+    }
+  }
+}
