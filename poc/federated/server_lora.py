@@ -112,9 +112,13 @@ def main():
     ]
     param_names = [n for n, _ in trainable_named]
 
-    if final_ckpt.exists():
-        print(f"  Resuming from {final_ckpt}", flush=True)
-        ckpt = torch.load(final_ckpt, map_location="cpu", weights_only=True)
+    # Find the most recent checkpoint: prefer round checkpoints over the final file
+    round_ckpts = sorted(ckpt_dir.glob("theta_star_lora_round_*.pt"))
+    resume_ckpt = round_ckpts[-1] if round_ckpts else (final_ckpt if final_ckpt.exists() else None)
+
+    if resume_ckpt is not None:
+        print(f"  Resuming from {resume_ckpt.name}", flush=True)
+        ckpt = torch.load(resume_ckpt, map_location="cpu", weights_only=True)
         with torch.no_grad():
             for n, p in trainable_named:
                 if n in ckpt:
@@ -148,6 +152,9 @@ def main():
         outer_lr=cfg["outer_lr"],
         min_available_clients=cfg["min_available_clients"],
         fraction_fit=cfg["fraction_fit"],
+        checkpoint_dir=str(ckpt_dir),
+        checkpoint_every=10,
+        param_names=param_names,
     )
 
     cohort_size = max(1, int(cfg["fraction_fit"] * cfg["min_available_clients"]))

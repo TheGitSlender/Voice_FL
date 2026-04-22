@@ -37,10 +37,13 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
     Per-FedAvg: server maintains θ* and applies gradient descent each round.
 
     Args:
-        initial_parameters: encoder weights as Flower Parameters
-        outer_lr:           β — server-side learning rate (default 2e-4)
+        initial_parameters:    encoder/LoRA weights as Flower Parameters
+        outer_lr:              β — server-side learning rate (default 2e-4)
         min_available_clients: minimum clients before server starts
-        fraction_fit:       fraction of available clients to use per round
+        fraction_fit:          fraction of available clients to use per round
+        checkpoint_dir:        if set, save θ* every `checkpoint_every` rounds
+        checkpoint_every:      rounds between checkpoints (default 10)
+        param_names:           parameter names for checkpoint state_dict keys
     """
 
     def __init__(
@@ -49,11 +52,17 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
         outer_lr: float = 2e-4,
         min_available_clients: int = 5,
         fraction_fit: float = 1.0,
+        checkpoint_dir: Optional[str] = None,
+        checkpoint_every: int = 10,
+        param_names: Optional[List[str]] = None,
     ):
         super().__init__()
         self.outer_lr = outer_lr
         self.fraction_fit = fraction_fit
         self.min_available_clients = min_available_clients
+        self._checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
+        self._checkpoint_every = checkpoint_every
+        self._param_names = param_names
 
         self._theta_star: list[np.ndarray] = parameters_to_ndarrays(initial_parameters)
 
@@ -116,8 +125,26 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
             f"β={self.outer_lr} | total_examples={total_weight}"
         )
 
+        if (
+            self._checkpoint_dir is not None
+            and self._param_names is not None
+            and server_round % self._checkpoint_every == 0
+        ):
+            self._save_checkpoint(server_round)
+
         updated_params = ndarrays_to_parameters(self._theta_star)
         return updated_params, {"round": server_round}
+
+    def _save_checkpoint(self, server_round: int) -> None:
+        import torch
+        self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        path = self._checkpoint_dir / f"theta_star_lora_round_{server_round:04d}.pt"
+        state_dict = {
+            name: torch.tensor(arr.astype("float32"))
+            for name, arr in zip(self._param_names, self._theta_star)
+        }
+        torch.save(state_dict, path)
+        print(f"  [server] Checkpoint saved: {path.name}", flush=True)
 
     def configure_evaluate(self, server_round, parameters, client_manager):
         """Evaluation handled externally by eval_poc.py."""

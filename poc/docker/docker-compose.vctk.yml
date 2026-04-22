@@ -11,9 +11,7 @@ version: "3.9"
 #        docker compose -f docker/docker-compose.vctk.yml build
 #   2. VCTK nodes prepared:
 #        python data/prepare_vctk_lora.py
-#   3. Centralized gate passed:
-#        python -u maml/meta_train.py --config configs/vctk_lora_poc.yaml
-#   4. Set HF_CACHE to your HuggingFace cache dir, e.g.:
+#   3. Set HF_CACHE to your HuggingFace cache dir:
 #        export HF_CACHE=/teamspace/studios/this_studio/.cache/huggingface
 #
 # Run:
@@ -39,8 +37,12 @@ x-node-base: &node-base
   environment:
     - PYTHONUNBUFFERED=1
     - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+    # Offline mode: model already cached, prevents 12 containers hitting HF simultaneously
+    - HF_HUB_OFFLINE=1
+    - TRANSFORMERS_OFFLINE=1
   volumes:
-    - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+    # Read-write so HuggingFace can create .locks/ for concurrent model loading
+    - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
   command: >
     python federated/run_node_lora.py
       --config configs/vctk_lora_poc.yaml
@@ -67,9 +69,11 @@ services:
     volumes:
       - ../checkpoints/federated:/app/checkpoints/federated
       - ../checkpoints/centralized:/app/checkpoints/centralized:ro
-      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
     environment:
       - PYTHONUNBUFFERED=1
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
     command: >
       python federated/server_lora.py
         --config configs/vctk_lora_poc.yaml
@@ -81,117 +85,141 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       - SPEAKER_ID=p225
     volumes:
       - ../data/vctk_nodes/p225:/data:ro
-      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
 
   node_p226:
     <<: *node-base
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       - SPEAKER_ID=p226
     volumes:
       - ../data/vctk_nodes/p226:/data:ro
-      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
 
   node_p227:
     <<: *node-base
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       - SPEAKER_ID=p227
     volumes:
       - ../data/vctk_nodes/p227:/data:ro
-      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
 
   node_p228:
     <<: *node-base
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       - SPEAKER_ID=p228
     volumes:
       - ../data/vctk_nodes/p228:/data:ro
-      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
 
   node_p229:
     <<: *node-base
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       - SPEAKER_ID=p229
     volumes:
       - ../data/vctk_nodes/p229:/data:ro
-      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
 
   node_p230:
     <<: *node-base
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       - SPEAKER_ID=p230
     volumes:
       - ../data/vctk_nodes/p230:/data:ro
-      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
 
   node_p231:
     <<: *node-base
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       - SPEAKER_ID=p231
     volumes:
       - ../data/vctk_nodes/p231:/data:ro
-      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
 
   node_p232:
     <<: *node-base
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       - SPEAKER_ID=p232
     volumes:
       - ../data/vctk_nodes/p232:/data:ro
-      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
 
   node_p233:
     <<: *node-base
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       - SPEAKER_ID=p233
     volumes:
       - ../data/vctk_nodes/p233:/data:ro
-      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
 
   node_p234:
     <<: *node-base
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       - SPEAKER_ID=p234
     volumes:
       - ../data/vctk_nodes/p234:/data:ro
-      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
 
   node_p236:
     <<: *node-base
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       - SPEAKER_ID=p236
     volumes:
       - ../data/vctk_nodes/p236:/data:ro
-      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
 
   node_p237:
     <<: *node-base
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       - SPEAKER_ID=p237
     volumes:
       - ../data/vctk_nodes/p237:/data:ro
-      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
