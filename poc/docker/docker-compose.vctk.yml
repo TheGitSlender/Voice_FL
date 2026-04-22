@@ -1,0 +1,197 @@
+version: "3.9"
+
+# FedLoRA-MAML — Phase 2 federated stack (VCTK, 12 nodes)
+#
+# One server + 12 node containers sharing the host GPU.
+# Each round the server samples fraction_fit=0.5 → 6 nodes.
+# Nodes not selected in a given round are idle (connected but waiting).
+#
+# Prerequisites:
+#   1. Build images:
+#        docker compose -f docker/docker-compose.vctk.yml build
+#   2. VCTK nodes prepared:
+#        python data/prepare_vctk_lora.py
+#   3. Centralized gate passed:
+#        python -u maml/meta_train.py --config configs/vctk_lora_poc.yaml
+#   4. Set HF_CACHE to your HuggingFace cache dir, e.g.:
+#        export HF_CACHE=/teamspace/studios/this_studio/.cache/huggingface
+#
+# Run:
+#   docker compose -f docker/docker-compose.vctk.yml up
+#
+# Monitor:
+#   docker compose -f docker/docker-compose.vctk.yml logs -f server
+
+networks:
+  voicefl-net:
+    driver: bridge
+
+x-node-base: &node-base
+  image: voicefl-lora-node
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.node
+  networks:
+    - voicefl-net
+  depends_on:
+    server:
+      condition: service_started
+  environment:
+    - PYTHONUNBUFFERED=1
+    - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+  volumes:
+    - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+  command: >
+    python federated/run_node_lora.py
+      --config configs/vctk_lora_poc.yaml
+      --server_address server:8080
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+  restart: "no"
+
+services:
+  server:
+    image: voicefl-lora-server
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    networks:
+      - voicefl-net
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../checkpoints/federated:/app/checkpoints/federated
+      - ../checkpoints/centralized:/app/checkpoints/centralized:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+      python federated/server_lora.py
+        --config configs/vctk_lora_poc.yaml
+    restart: "no"
+
+  # ── meta-train nodes (12) ────────────────────────────────────────────────
+  node_p225:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - SPEAKER_ID=p225
+    volumes:
+      - ../data/vctk_nodes/p225:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+
+  node_p226:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - SPEAKER_ID=p226
+    volumes:
+      - ../data/vctk_nodes/p226:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+
+  node_p227:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - SPEAKER_ID=p227
+    volumes:
+      - ../data/vctk_nodes/p227:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+
+  node_p228:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - SPEAKER_ID=p228
+    volumes:
+      - ../data/vctk_nodes/p228:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+
+  node_p229:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - SPEAKER_ID=p229
+    volumes:
+      - ../data/vctk_nodes/p229:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+
+  node_p230:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - SPEAKER_ID=p230
+    volumes:
+      - ../data/vctk_nodes/p230:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+
+  node_p231:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - SPEAKER_ID=p231
+    volumes:
+      - ../data/vctk_nodes/p231:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+
+  node_p232:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - SPEAKER_ID=p232
+    volumes:
+      - ../data/vctk_nodes/p232:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+
+  node_p233:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - SPEAKER_ID=p233
+    volumes:
+      - ../data/vctk_nodes/p233:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+
+  node_p234:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - SPEAKER_ID=p234
+    volumes:
+      - ../data/vctk_nodes/p234:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+
+  node_p236:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - SPEAKER_ID=p236
+    volumes:
+      - ../data/vctk_nodes/p236:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro
+
+  node_p237:
+    <<: *node-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - SPEAKER_ID=p237
+    volumes:
+      - ../data/vctk_nodes/p237:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface:ro

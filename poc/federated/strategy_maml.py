@@ -63,9 +63,12 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
     def configure_fit(
         self, server_round: int, parameters: Parameters, client_manager
     ) -> List[Tuple[ClientProxy, FitIns]]:
-                                                                                  
+        # Block until min_available_clients have connected, then sample
+        # fraction_fit of them. With fraction_fit=1.0 this is identical to
+        # the old behaviour (samples all min_available_clients each round).
+        num_sample = max(1, int(self.fraction_fit * self.min_available_clients))
         clients = client_manager.sample(
-            num_clients=self.min_available_clients,
+            num_clients=num_sample,
             min_num_clients=self.min_available_clients,
         )
         fit_ins = FitIns(parameters=parameters, config={"round": server_round})
