@@ -32,7 +32,6 @@ from flwr.server.client_proxy import ClientProxy
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-
 class PerFedAvgStrategy(fl.server.strategy.Strategy):
     """
     Per-FedAvg: server maintains θ* and applies gradient descent each round.
@@ -56,7 +55,6 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
         self.fraction_fit = fraction_fit
         self.min_available_clients = min_available_clients
 
-        # θ* stored as list of numpy float32 arrays (encoder params)
         self._theta_star: list[np.ndarray] = parameters_to_ndarrays(initial_parameters)
 
     def initialize_parameters(self, client_manager) -> Optional[Parameters]:
@@ -65,9 +63,9 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
     def configure_fit(
         self, server_round: int, parameters: Parameters, client_manager
     ) -> List[Tuple[ClientProxy, FitIns]]:
-        sample_size = max(1, int(len(client_manager.all()) * self.fraction_fit))
+                                                                                  
         clients = client_manager.sample(
-            num_clients=sample_size,
+            num_clients=self.min_available_clients,
             min_num_clients=self.min_available_clients,
         )
         fit_ins = FitIns(parameters=parameters, config={"round": server_round})
@@ -88,9 +86,6 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
         if failures:
             print(f"  [server] Round {server_round}: {len(failures)} client failures")
 
-        # Stream-accumulate gradients one client at a time to avoid holding
-        # all 5 × 378 MB decoded arrays in memory simultaneously.
-        # Accumulators are float32 to avoid float16 overflow (max ~65504).
         n_params = len(self._theta_star)
         acc_grads = [np.zeros(t.shape, dtype=np.float32) for t in self._theta_star]
         total_weight = 0
@@ -100,14 +95,12 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
             w = fit_res.num_examples
             total_weight += w
             for i, g in enumerate(grads):
-                # Upcast float16 wire gradients to float32 before accumulation
+                                                                              
                 acc_grads[i] += w * g.astype(np.float32)
-            # Free this client's decoded arrays immediately
+                                                           
             del grads, fit_res
             gc.collect()
 
-        # Normalise and apply Per-FedAvg update: θ* ← θ* − β · avg_grad
-        # Upcast to float32 for the update then back to float16 for storage.
         for i in range(n_params):
             avg = acc_grads[i].astype(np.float32) / total_weight
             self._theta_star[i] = (

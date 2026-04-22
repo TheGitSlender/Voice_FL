@@ -20,7 +20,6 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--config", type=str, default=None)
@@ -28,7 +27,6 @@ def parse_args():
     p.add_argument("--port", type=int, default=None)
     p.add_argument("--outer_lr", type=float, default=None)
     return p.parse_args()
-
 
 def load_config(path: str | None) -> dict:
     import yaml
@@ -47,7 +45,6 @@ def load_config(path: str | None) -> dict:
     defaults.update(cfg.get("federated", {}))
     defaults.update(cfg.get("maml", {}))
     return defaults
-
 
 def main():
     args = parse_args()
@@ -68,7 +65,6 @@ def main():
     ckpt_dir = Path(cfg["checkpoint_dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load or initialize θ*
     final_ckpt = ckpt_dir / "theta_star.pt"
     centralized_ckpt = ROOT / "checkpoints" / "centralized" / "theta_star.pt"
 
@@ -76,15 +72,10 @@ def main():
     model = Wav2Vec2MAML(device="cpu")
     processor = load_processor()
 
-    # Load checkpoint FIRST (while parametrizations are still active), then
-    # strip them.  Centralized checkpoints are saved with parametrization keys
-    # (original0/original1); the federated checkpoint is saved without (plain
-    # weight).  We handle both by loading before stripping.
     if final_ckpt.exists():
         print(f"  Resuming from {final_ckpt}")
         ckpt = torch.load(final_ckpt, map_location="cpu", weights_only=True)
-        # Federated checkpoint may already have plain `weight` key — if so,
-        # temporarily strip parametrizations before loading.
+                                                                           
         conv = model.model.wav2vec2.encoder.pos_conv_embed.conv
         if hasattr(conv, "parametrizations") and "weight" in conv.parametrizations:
             if "encoder.pos_conv_embed.conv.weight" in ckpt:
@@ -92,24 +83,19 @@ def main():
         model.set_encoder_state_dict(ckpt)
     elif centralized_ckpt.exists():
         print(f"  Seeding from centralized checkpoint: {centralized_ckpt}")
-        # Centralized checkpoint has parametrization keys — load with them active.
+                                                                                  
         model.set_encoder_state_dict(
             torch.load(centralized_ckpt, map_location="cpu", weights_only=True)
         )
     else:
         print("  Using fresh pretrained weights")
 
-    # Now strip parametrizations so outer_loop_params layout matches clients
-    # (clients call to_bf16() which removes parametrizations internally).
-    # 211 params (original0 + original1 + …) → 210 params (plain weight + …)
     conv = model.model.wav2vec2.encoder.pos_conv_embed.conv
     if hasattr(conv, "parametrizations") and "weight" in conv.parametrizations:
         torch.nn.utils.parametrize.remove_parametrizations(conv, "weight")
 
     import gc
 
-    # Use float16 for wire transfer — halves message size (~189 MB vs 378 MB)
-    # so 5 concurrent sends in Round 3 use ~945 MB instead of ~1.9 GB.
     initial_ndarrays = [
         p.detach().half().cpu().numpy()
         for p in model.get_outer_loop_params()
@@ -117,9 +103,6 @@ def main():
     initial_params = ndarrays_to_parameters(initial_ndarrays)
     del initial_ndarrays
 
-    # Free the model object — it is not needed during FL rounds.
-    # The strategy holds θ* as numpy arrays; the model is only needed at the
-    # end to reconstruct the final state dict for saving.
     param_names = [name for name, _ in model.model.wav2vec2.named_parameters()]
     del model
     gc.collect()
@@ -138,10 +121,9 @@ def main():
         server_address=address,
         config=fl.server.ServerConfig(num_rounds=cfg["rounds"]),
         strategy=strategy,
-        grpc_max_message_length=512 * 1024 * 1024,  # 512 MB for large model params
+        grpc_max_message_length=512 * 1024 * 1024,                                 
     )
 
-    # Save final θ* — upcast float16 wire arrays back to float32 for the checkpoint
     final_arrays = strategy._theta_star
     state_dict = {
         name: torch.tensor(arr.astype("float32"))
@@ -150,7 +132,6 @@ def main():
     torch.save(state_dict, final_ckpt)
     print(f"\nFinal θ* saved: {final_ckpt}")
     return history
-
 
 if __name__ == "__main__":
     main()

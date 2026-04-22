@@ -40,7 +40,6 @@ from models.wav2vec2_maml import Wav2Vec2MAML, load_processor
 from data.task_sampler import VoiceTaskSampler
 from maml.engine import MAMLEngine
 
-
 class MAMLClient(fl.client.Client):
     """
     Flower client implementing PerFedAvg protocol.
@@ -64,6 +63,9 @@ class MAMLClient(fl.client.Client):
         self.model = Wav2Vec2MAML(device=self.device)
         if self.device.type == "cuda":
             self.model.to_bf16()
+        else:
+                                                                             
+            self.model.strip_weight_parametrizations()
 
         self.processor = load_processor()
         self.sampler = VoiceTaskSampler(node_dir, support_size, query_size)
@@ -73,7 +75,6 @@ class MAMLClient(fl.client.Client):
 
         print(f"[client] Node dir: {Path(node_dir).name[:16]} | clips: {self.sampler.num_clips}")
 
-    # ------------------------------------------------------------------
     def get_parameters(self, ins: GetParametersIns) -> GetParametersRes:
         """Return encoder weights (lm_head EXCLUDED — Invariant I3).
 
@@ -114,17 +115,12 @@ class MAMLClient(fl.client.Client):
         task = self.sampler.sample_task()
         meta_grads = self.engine.compute_meta_gradient(task)
 
-        # Clip gradient norm to float16-safe range before wire transfer.
-        # BF16 range (~3.4e38) >> float16 range (~65504); values above float16
-        # max would silently become Inf.  A norm cap of 10.0 keeps individual
-        # parameter gradients well within float16 representable range.
         total_norm = sum(g.float().norm() ** 2 for g in meta_grads) ** 0.5
         max_norm = 10.0
         clip_coef = max_norm / (total_norm.item() + 1e-6)
         if clip_coef < 1.0:
             meta_grads = [g * clip_coef for g in meta_grads]
 
-        # Encode gradients as float16 numpy arrays — halves message size
         grad_arrays = [g.half().cpu().numpy() for g in meta_grads]
 
         num_examples = len(task.support_audio) + len(task.query_audio)

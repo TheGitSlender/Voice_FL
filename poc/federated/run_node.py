@@ -21,14 +21,14 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--config", type=str, default=None)
     p.add_argument("--server_address", type=str, default=None)
     p.add_argument("--device", type=str, default=None)
+    p.add_argument("--nodes_dir", type=str, default=None,
+                   help="Local nodes directory override (e.g. data/nodes for local runs)")
     return p.parse_args()
-
 
 def load_config(path: str | None) -> dict:
     import yaml
@@ -49,7 +49,6 @@ def load_config(path: str | None) -> dict:
     defaults.update(cfg.get("maml", {}))
     return defaults
 
-
 def main():
     args = parse_args()
     cfg = load_config(args.config)
@@ -57,13 +56,14 @@ def main():
         cfg["server_address"] = args.server_address
     if args.device is not None:
         cfg["device"] = args.device
+    if args.nodes_dir is not None:
+        cfg["nodes_dir"] = args.nodes_dir
 
     speaker_hash = os.environ.get("SPEAKER_HASH", "")
     if not speaker_hash:
         print("ERROR: SPEAKER_HASH environment variable not set")
         sys.exit(1)
 
-    # In Docker, /data is mounted directly; locally, use data/nodes/{hash}
     nodes_dir = cfg["nodes_dir"]
     if nodes_dir == "/data":
         node_dir = Path("/data")
@@ -92,13 +92,10 @@ def main():
         query_size=cfg["query_size"],
     )
 
-    # Wait for the server's gRPC port to be reachable before handing off to Flower.
-    # The server container starts first but the gRPC listener takes a few seconds
-    # to bind (model loading + HuggingFace cache warm-up).
     import socket
     host, port_str = cfg["server_address"].rsplit(":", 1)
     port = int(port_str)
-    max_wait = 120  # seconds
+    max_wait = 120           
     poll_interval = 3
     elapsed = 0
     print(f"[node] Waiting for server at {host}:{port}...")
@@ -119,7 +116,6 @@ def main():
         client=client,
         grpc_max_message_length=512 * 1024 * 1024,
     )
-
 
 if __name__ == "__main__":
     main()

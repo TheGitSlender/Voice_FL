@@ -1,0 +1,82 @@
+{
+  "node_dir": "/home/theslender/coding_stuff/voice_fl/poc/data/nodes/0b76a786e8b9ca45",
+  "device": "cuda",
+  "n_clips": 10,
+  "mean_loss": 35.75543060302734,
+  "mean_lm_head_grad_norm": 36.75308094024658,
+  "std_lm_head_grad_norm": 16.99638756009069,
+  "ctc_loss_appears_averaged": true,
+  "per_clip": [
+    {
+      "loss": 27.09717559814453,
+      "norm": 26.570035934448242
+    },
+    {
+      "loss": 35.0474967956543,
+      "norm": 32.17780685424805
+    },
+    {
+      "loss": 18.137744903564453,
+      "norm": 19.28443145751953
+    },
+    {
+      "loss": 60.94720458984375,
+      "norm": 40.085811614990234
+    },
+    {
+      "loss": 34.72058868408203,
+      "norm": 37.198116302490234
+    },
+    {
+      "loss": 18.066585540771484,
+      "norm": 27.859458923339844
+    },
+    {
+      "loss": 30.958019256591797,
+      "norm": 35.47846984863281
+    },
+    {
+      "loss": 68.2667007446289,
+      "norm": 83.36946105957031
+    },
+    {
+      "loss": 42.34859085083008,
+      "norm": 41.75043869018555
+    },
+    {
+      "loss": 21.96419906616211,
+      "norm": 23.756778717041016
+    }
+  ],
+  "lr_trajectory_check": {
+    "1e-05": {
+      "trajectory": [
+        32.198418617248535,
+        32.986557960510254,
+        25.135635375976562
+      ],
+      "converges": true,
+      "direction": "DECREASING"
+    },
+    "0.0001": {
+      "trajectory": [
+        28.524889707565308,
+        32.63844060897827,
+        35.10823154449463
+      ],
+      "converges": false,
+      "direction": "DIVERGING/FLAT"
+    },
+    "0.001": {
+      "trajectory": [
+        40.82404804229736,
+        27.218315601348877,
+        34.19631004333496
+      ],
+      "converges": true,
+      "direction": "DECREASING"
+    }
+  },
+  "recommended_inner_lr": 0.001,
+  "recommendation": "inner_lr looks reasonable"
+}

@@ -1,0 +1,30 @@
+FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-devel
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsndfile1 \
+        git \
+        wget \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY ctc/        ./ctc/
+COPY data/       ./data/
+COPY evaluation/ ./evaluation/
+COPY maml/       ./maml/
+COPY models/     ./models/
+COPY configs/    ./configs/
+COPY scripts/    ./scripts/
+COPY federated/  ./federated/
+
+VOLUME ["/app/data/vctk_nodes", "/app/checkpoints", "/app/mlruns"]
+
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV HF_HOME=/app/.cache/huggingface
+
+CMD ["python", "-u", "maml/meta_train.py", "--config", "configs/vctk_lora_poc.yaml"]

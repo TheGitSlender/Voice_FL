@@ -1,18 +1,5 @@
 version: "3.9"
 
-# VoiceFL-MAML PoC — 5 nodes + 1 server
-# Each node mounts its own speaker data volume; no cross-node data access.
-# Server has no data volumes — receives only meta-gradients over gRPC.
-#
-# Usage:
-#   docker-compose up                        # full 20-round run
-#   NUM_ROUNDS=5 docker-compose up           # smoke test (5 rounds)
-#
-# Requires:
-#   - nvidia-docker2 runtime
-#   - data/nodes/ populated (run the data pipeline first)
-#   - data/speaker_selection.json to know the node hashes
-
 networks:
   voicefl-net:
     driver: bridge
@@ -59,11 +46,6 @@ services:
         --config configs/poc.yaml
         --rounds ${NUM_ROUNDS:-20}
     restart: "no"
-
-  # ---------------------------------------------------------------------------
-  # Replace NODE_HASH_1..5 with actual hashes from data/speaker_selection.json
-  # The build.sh script generates a resolved docker-compose.resolved.yml
-  # ---------------------------------------------------------------------------
 
   node1:
     <<: *node-base

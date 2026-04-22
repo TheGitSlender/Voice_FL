@@ -1,0 +1,15 @@
+{
+  "meta_train": {
+    "RRBI": "hi", "HQTV": "hi", "TNI": "hi", "NCC": "hi",
+    "YKWK": "ko", "ERMS": "ko", "EBVS": "ko", "HJK": "ko",
+    "MBMPS": "zh", "HKK": "zh", "BWC": "zh", "LXC": "zh"
+  },
+  "meta_val": {
+    "SVBI": "es", "NJS": "es", "TXHC": "es", "ZHAA": "es"
+  },
+  "meta_test": {
+    "SKA": "ar", "YBAA": "ar",
+    "PNV": "vi", "THV": "vi"
+  },
+  "note": "meta_test locked before any training. Evaluated ONCE at the end."
+}

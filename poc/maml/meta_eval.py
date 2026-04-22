@@ -12,7 +12,6 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-
 def evaluate_node(
     model,
     processor,
@@ -53,7 +52,6 @@ def evaluate_node(
         "wer_k3_list": wer3_list,
         "adaptation_passed": sum(wer3_list) / len(wer3_list) < sum(wer0_list) / len(wer0_list),
     }
-
 
 def load_theta_star(model, checkpoint_path: str | Path) -> None:
     """Load encoder state dict from a checkpoint into model."""

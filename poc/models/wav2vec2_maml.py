@@ -25,7 +25,6 @@ from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
 MODEL_NAME = "facebook/wav2vec2-base-960h"
 
-
 class Wav2Vec2MAML(nn.Module):
     def __init__(self, device: str | torch.device = "cpu"):
         super().__init__()
@@ -33,9 +32,6 @@ class Wav2Vec2MAML(nn.Module):
         self.model = Wav2Vec2ForCTC.from_pretrained(MODEL_NAME)
         self.model = self.model.to(self.device)
 
-        # Invariant I6: encoder must keep requires_grad=True.
-        # We do NOT set requires_grad=False on the encoder.
-        # The inner-loop optimizer only receives lm_head params.
         self._verify_invariant_i6()
 
     def _verify_invariant_i6(self) -> None:
@@ -54,7 +50,7 @@ class Wav2Vec2MAML(nn.Module):
         Invariant I3: lm_head parameters are NOT included.
         """
         params = list(self.model.wav2vec2.parameters())
-        # Verify no lm_head params leaked in
+                                            
         lm_head_ids = {id(p) for p in self.model.lm_head.parameters()}
         for p in params:
             assert id(p) not in lm_head_ids, "INVARIANT VIOLATION I3: lm_head in outer params"
@@ -98,6 +94,16 @@ class Wav2Vec2MAML(nn.Module):
         self.model.wav2vec2.load_state_dict(state_dict)
         self._verify_invariant_i6()
 
+    def strip_weight_parametrizations(self) -> "Wav2Vec2MAML":
+        """Remove pos_conv_embed weight parametrization so parameter count matches
+        the server's 210-param layout (server calls this internally too).
+        Must be called on CPU clients that do not call to_bf16().
+        """
+        conv = self.model.wav2vec2.encoder.pos_conv_embed.conv
+        if hasattr(conv, "parametrizations") and "weight" in conv.parametrizations:
+            torch.nn.utils.parametrize.remove_parametrizations(conv, "weight")
+        return self
+
     def to_bf16(self) -> "Wav2Vec2MAML":
         """Cast model to BF16 for VRAM efficiency.
 
@@ -112,10 +118,8 @@ class Wav2Vec2MAML(nn.Module):
         self.model = self.model.to(torch.bfloat16)
         return self
 
-
 def load_processor() -> "Wav2Vec2Processor":
     return Wav2Vec2Processor.from_pretrained(MODEL_NAME)
-
 
 def _smoke_test() -> None:
     print("Wav2Vec2MAML smoke test...")
@@ -129,12 +133,10 @@ def _smoke_test() -> None:
     model.verify_param_partition()
     print("  param partition: OK")
 
-    # Tiny forward pass
     dummy = torch.zeros(1, 16000)
     out = model(dummy)
     print(f"  logits shape: {out.logits.shape}")
     print("Smoke test PASSED")
-
 
 if __name__ == "__main__":
     _smoke_test()

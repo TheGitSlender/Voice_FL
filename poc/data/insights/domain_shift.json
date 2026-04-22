@@ -1,0 +1,10 @@
+{
+  "vctk_mean_wer_k0": 0.03208556149732621,
+  "librispeech_wer_k0": 0.0199203187250996,
+  "per_node_vctk_wer": [
+    0.06417112299465241,
+    0.0
+  ],
+  "finding": "Moderate or low domain shift \u2014 investigate whether personalization is necessary",
+  "warning": "VCTK WER < 5% with pretrained model (no adaptation). Personalization may have little room to improve. Document this finding and reassess whether the PoC claim is achievable."
+}

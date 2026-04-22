@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  train:
+    image: voicefl-train
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.train
+    volumes:
+      - ../data/vctk_nodes:/app/data/vctk_nodes:ro
+      - ../checkpoints:/app/checkpoints
+      - ../mlruns:/app/mlruns
+      - ${HF_CACHE:-~/.cache/huggingface}:/app/.cache/huggingface
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - CONFIG=${CONFIG:-configs/vctk_lora_poc.yaml}
+    command: >
+      python -u maml/meta_train.py
+        --config ${CONFIG:-configs/vctk_lora_poc.yaml}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: "no"

@@ -1,0 +1,43 @@
+model:
+  name: facebook/wav2vec2-base-960h
+  mode: lora_maml
+  lora_rank: 8
+  lora_alpha: 16
+  lora_layers: [6, 7, 8, 9, 10, 11]
+  lora_targets: [q_proj, k_proj, v_proj, out_proj]
+
+maml:
+  mode: lora_maml
+  rounds: 200
+  k: 5
+  inner_lr: 1.0e-4
+  outer_lr: 5.0e-4
+  outer_optimizer: adamw
+  outer_weight_decay: 1.0e-4
+  lr_schedule: cosine
+  lr_warmup_rounds: 20
+  tasks_per_node: 4
+  support_size: 8
+  query_size: 30
+  eval_support_size: 20
+  eval_query_size: 50
+  max_audio_samples: 48000
+  lora_rank: 8
+  lora_alpha: 16.0
+
+federated:
+  num_nodes: 12
+  cohort_fraction: 0.5
+  num_rounds: 200
+
+data:
+  dataset: vctk
+  nodes_dir: data/vctk_nodes
+  split_file: data/vctk_split.json
+  meta_split: data/vctk_split.json
+
+hardware:
+  device: cuda
+
+logging:
+  experiment_name: fedlora_maml_vctk

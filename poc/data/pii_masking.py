@@ -23,20 +23,17 @@ SELECTION_FILE = DATA_DIR / "speaker_selection.json"
 SALT_FILE = DATA_DIR / "salt.txt"
 SAMPLE_RATE = 16000
 
-
 def load_selection() -> dict:
     if not SELECTION_FILE.exists():
         print("ERROR: speaker_selection.json not found. Run: python data/download.py")
         sys.exit(1)
     return json.loads(SELECTION_FILE.read_text())
 
-
 def load_salt() -> str:
     if not SALT_FILE.exists():
         print("ERROR: salt.txt not found. Run: python data/download.py")
         sys.exit(1)
     return SALT_FILE.read_text().strip()
-
 
 def build_speaker_id_to_hash(ds, salt: str, selection: dict) -> dict:
     """Scan the dataset to find which speaker IDs map to our selected node hashes."""
@@ -55,7 +52,6 @@ def build_speaker_id_to_hash(ds, salt: str, selection: dict) -> dict:
         if len(result) == len(selection):
             break
     return result
-
 
 def main():
     try:
@@ -85,7 +81,6 @@ def main():
         print(f"ERROR: Could not resolve all speakers. Missing node hashes: {missing}")
         sys.exit(1)
 
-    # Collect clips per node; strip all PII fields
     node_clips: dict[str, list] = {h: [] for h in selection}
     print("Collecting clips (stripping PII)...")
     for i, item in enumerate(ds):
@@ -93,7 +88,7 @@ def main():
         if spk not in spk_to_hash:
             continue
         node_hash = spk_to_hash[spk]
-        # Only keep audio array and normalized text — no identity fields
+                                                                        
         clean = {
             "audio": item["audio"]["array"].astype("float32"),
             "text": item["text"].upper().strip(),
@@ -111,7 +106,6 @@ def main():
             pickle.dump(clips, f)
         print(f"  {node_hash}: {len(clips)} clips → {pkl_path}")
 
-    # Final PII check
     import subprocess
     result = subprocess.run(
         ["grep", "-r", "speaker_id", str(NODES_DIR)],
@@ -122,7 +116,6 @@ def main():
         sys.exit(1)
     print("\nI2 check: PASSED — no speaker_id in data/nodes/")
     print("Run: python data/features.py")
-
 
 if __name__ == "__main__":
     main()

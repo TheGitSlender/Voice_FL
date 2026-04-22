@@ -1,29 +1,21 @@
-# VoiceFL node image
-# Python 3.10 on PyTorch 2.1 + CUDA 12.1
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
 
 WORKDIR /app
 
-# System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 \
-        grep \
-        findutils \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Application code (read-only via bind mount in compose, but copy here for image layer)
+COPY ctc/        ./ctc/
 COPY data/       ./data/
 COPY models/     ./models/
 COPY maml/       ./maml/
 COPY federated/  ./federated/
 COPY configs/    ./configs/
 
-# /data is the node's feature volume — mounted at runtime
-# /checkpoints is the node's local checkpoint dir — mounted at runtime
 VOLUME ["/data", "/checkpoints"]
 
 ENV PYTHONPATH=/app

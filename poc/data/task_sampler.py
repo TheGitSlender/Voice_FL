@@ -16,13 +16,11 @@ from typing import NamedTuple
 
 import torch
 
-
 class Task(NamedTuple):
-    support_audio: list  # list of (T_i,) float32 tensors
-    support_labels: list  # list of str
-    query_audio: list    # list of (T_j,) float32 tensors
-    query_labels: list   # list of str
-
+    support_audio: list                                  
+    support_labels: list               
+    query_audio: list                                    
+    query_labels: list                
 
 class VoiceTaskSampler:
     def __init__(
@@ -71,7 +69,6 @@ class VoiceTaskSampler:
         support_idx = indices[: self.support_size]
         query_idx = indices[self.support_size :]
 
-        # Invariant I5
         overlap = set(support_idx) & set(query_idx)
         assert not overlap, f"INVARIANT VIOLATION I5: support∩query={overlap}"
 
@@ -81,7 +78,6 @@ class VoiceTaskSampler:
             query_audio=[self._features[i] for i in query_idx],
             query_labels=[self._labels[i] for i in query_idx],
         )
-
 
 def _smoke_test(node_dir: str) -> None:
     """Quick smoke test — run as __main__."""
@@ -100,7 +96,6 @@ def _smoke_test(node_dir: str) -> None:
             f"label='{task.support_labels[0][:30]}'"
         )
     print("Smoke test PASSED")
-
 
 if __name__ == "__main__":
     import sys

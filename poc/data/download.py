@@ -32,7 +32,6 @@ PREFERRED_DUR_STD_MIN = 1.0
 PREFERRED_DUR_STD_MAX = 2.0
 SAMPLE_RATE = 16000
 
-
 def load_salt() -> str:
     if SALT_FILE.exists():
         return SALT_FILE.read_text().strip()
@@ -40,11 +39,9 @@ def load_salt() -> str:
     SALT_FILE.write_text(salt)
     return salt
 
-
 def hash_speaker(speaker_id: int, salt: str) -> str:
     raw = f"{salt}:{speaker_id}".encode()
     return hashlib.sha256(raw).hexdigest()[:16]
-
 
 def compute_speaker_stats(dataset) -> dict:
     """Compute per-speaker clip count and duration statistics."""
@@ -58,7 +55,6 @@ def compute_speaker_stats(dataset) -> dict:
         duration_s = n_samples / SAMPLE_RATE
         stats[spk].append(duration_s)
     return stats
-
 
 def select_speakers(stats: dict) -> list[dict]:
     """Select 5 speakers meeting low-heterogeneity criteria."""
@@ -76,7 +72,6 @@ def select_speakers(stats: dict) -> list[dict]:
             "duration_std": std,
         })
 
-    # Tier 1: preferred range
     tier1 = [
         c for c in candidates
         if PREFERRED_MIN_CLIPS <= c["clip_count"] <= PREFERRED_MAX_CLIPS
@@ -90,11 +85,9 @@ def select_speakers(stats: dict) -> list[dict]:
             f"Not enough speakers meeting criteria. Found {len(pool)}, need {TARGET_SPEAKERS}."
         )
 
-    # Sort by std ascending (most consistent speakers first), then by clip count
     pool.sort(key=lambda c: (c["duration_std"], abs(c["clip_count"] - 115)))
     selected = pool[:TARGET_SPEAKERS]
     return selected
-
 
 def main():
     try:
@@ -135,7 +128,6 @@ def main():
     SELECTION_FILE.write_text(json.dumps(selection, indent=2))
     print(f"\nSaved {len(selection)} speakers to {SELECTION_FILE}")
     print("Run: python data/pii_masking.py")
-
 
 if __name__ == "__main__":
     main()
