@@ -17,11 +17,11 @@ maml:
   lr_schedule: cosine
   lr_warmup_rounds: 20
   tasks_per_node: 4
-  support_size: 8
+  support_size: 20
   query_size: 30
   eval_support_size: 20
   eval_query_size: 50
-  max_audio_samples: 48000
+  max_audio_samples: null
   lora_rank: 8
   lora_alpha: 16.0
 

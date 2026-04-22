@@ -102,10 +102,8 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
             gc.collect()
 
         for i in range(n_params):
-            avg = acc_grads[i].astype(np.float32) / total_weight
-            self._theta_star[i] = (
-                self._theta_star[i].astype(np.float32) - self.outer_lr * avg
-            ).astype(np.float16)
+            avg = acc_grads[i] / total_weight
+            self._theta_star[i] = self._theta_star[i].astype(np.float32) - self.outer_lr * avg
 
         del acc_grads
         gc.collect()

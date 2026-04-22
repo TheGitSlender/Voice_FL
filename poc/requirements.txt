@@ -11,6 +11,5 @@ librosa>=0.10.0
 grpcio>=1.59.0
 grpcio-tools>=1.59.0
 higher>=0.2.1
-peft>=0.6.0,<0.15.0
 mlflow>=3.0.0
 scipy>=1.11.0
