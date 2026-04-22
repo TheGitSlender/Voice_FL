@@ -1,0 +1,29 @@
+{
+  "meta_train": [
+    "p225",
+    "p226",
+    "p227",
+    "p228",
+    "p229",
+    "p230",
+    "p231",
+    "p232",
+    "p233",
+    "p234",
+    "p236",
+    "p237"
+  ],
+  "meta_val": [
+    "p238",
+    "p239",
+    "p240",
+    "p241"
+  ],
+  "meta_test": [
+    "p243",
+    "p244",
+    "p245",
+    "p246"
+  ],
+  "note": "meta_test locked before any training. wav2vec2-base-960h was fine-tuned on American English (LibriSpeech). VCTK British/Scottish/Irish speakers are genuinely out-of-domain."
+}
