@@ -27,7 +27,7 @@ maml:
 
 federated:
   num_nodes: 12
-  cohort_fraction: 0.5
+  cohort_fraction: 0.33
   num_rounds: 200
 
 data:

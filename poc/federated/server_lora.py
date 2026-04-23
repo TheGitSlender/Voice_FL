@@ -47,6 +47,7 @@ def load_config(path: str | None) -> dict:
         "fraction_fit": 0.5,
         "checkpoint_dir": str(ROOT / "checkpoints" / "federated"),
         "port": 8080,
+        "experiment_name": "fedlora_maml_vctk",
     }
     if path is None:
         return defaults
@@ -68,6 +69,10 @@ def load_config(path: str | None) -> dict:
         defaults["fraction_fit"] = fed_cfg["cohort_fraction"]
     if "num_rounds" in fed_cfg and "rounds" not in maml_cfg:
         defaults["rounds"] = fed_cfg["num_rounds"]
+
+    log_cfg = cfg.get("logging", {})
+    if "experiment_name" in log_cfg:
+        defaults["experiment_name"] = log_cfg["experiment_name"]
 
     return defaults
 
@@ -116,8 +121,16 @@ def main():
     round_ckpts = sorted(ckpt_dir.glob("theta_star_lora_round_*.pt"))
     resume_ckpt = round_ckpts[-1] if round_ckpts else (final_ckpt if final_ckpt.exists() else None)
 
+    # Extract the round number from the checkpoint name so downstream logging
+    # (MLflow step, print output, checkpoint filenames) continues from the
+    # correct global round rather than restarting at 1 after each session.
+    round_offset = 0
+    if round_ckpts:
+        # filename: theta_star_lora_round_0020.pt  →  20
+        round_offset = int(round_ckpts[-1].stem.split("_")[-1])
+
     if resume_ckpt is not None:
-        print(f"  Resuming from {resume_ckpt.name}", flush=True)
+        print(f"  Resuming from {resume_ckpt.name} (round offset={round_offset})", flush=True)
         ckpt = torch.load(resume_ckpt, map_location="cpu", weights_only=True)
         with torch.no_grad():
             for n, p in trainable_named:
@@ -155,6 +168,8 @@ def main():
         checkpoint_dir=str(ckpt_dir),
         checkpoint_every=10,
         param_names=param_names,
+        experiment_name=cfg["experiment_name"],
+        round_offset=round_offset,
     )
 
     cohort_size = max(1, int(cfg["fraction_fit"] * cfg["min_available_clients"]))
@@ -182,6 +197,7 @@ def main():
     }
     torch.save(state_dict, final_ckpt)
     print(f"\nFinal θ* saved: {final_ckpt}", flush=True)
+    strategy.close()
     return history
 
 

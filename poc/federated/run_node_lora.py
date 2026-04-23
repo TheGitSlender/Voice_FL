@@ -116,6 +116,7 @@ def main():
         query_size=cfg["query_size"],
         tasks_per_node=cfg["tasks_per_node"],
         max_audio_samples=cfg.get("max_audio_samples"),
+        speaker_id=speaker_id,
     )
 
     # Poll until the Flower server is reachable

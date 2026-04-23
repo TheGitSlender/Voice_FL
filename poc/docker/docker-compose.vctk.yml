@@ -69,11 +69,13 @@ services:
     volumes:
       - ../checkpoints/federated:/app/checkpoints/federated
       - ../checkpoints/centralized:/app/checkpoints/centralized:ro
+      - ../mlruns:/app/mlruns
       - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
     environment:
       - PYTHONUNBUFFERED=1
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
+      - MLFLOW_TRACKING_URI=file:///app/mlruns
     command: >
       python federated/server_lora.py
         --config configs/vctk_lora_poc.yaml

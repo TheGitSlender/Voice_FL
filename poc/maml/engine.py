@@ -174,27 +174,30 @@ class MAMLEngine:
         self,
         task: "Task",
         return_query_loss: bool = False,
-    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], float]:
+        return_inner_losses: bool = False,
+    ):
         """
         Run one MAML-ANIL episode.
 
-        Dispatches to FOMAML (first-order) or second_order_ctc (true MAML)
-        based on self.mode.
-
         Args:
-            task:              Task namedtuple (support + query splits)
-            return_query_loss: If True, also return the scalar query loss value
+            task:               Task namedtuple (support + query splits)
+            return_query_loss:  If True, include scalar query loss in return value
+            return_inner_losses: If True (lora_maml only), include list[float] of
+                                 per-step mean support losses in return value
 
-        Returns:
-            Encoder meta-gradients — list of tensors with same shapes as
-            model.get_outer_loop_params(). These are gradients, not weight
-            updates (Invariant I4).
-            If return_query_loss is True, returns (grads, query_loss_scalar).
+        Returns (lora_maml mode, both flags True):
+            (grads, query_loss, inner_losses)
+        Returns (any mode, return_query_loss only):
+            (grads, query_loss)
+        Returns (default):
+            grads
         """
         if self.mode == "second_order_ctc":
             return self._compute_meta_gradient_second_order(task, return_query_loss)
         if self.mode == "lora_maml":
-            return self._compute_meta_gradient_lora_maml(task, return_query_loss)
+            return self._compute_meta_gradient_lora_maml(
+                task, return_query_loss, return_inner_losses
+            )
         return self._compute_meta_gradient_fomaml(task, return_query_loss)
 
     def _compute_meta_gradient_fomaml(
@@ -346,7 +349,8 @@ class MAMLEngine:
         self,
         task: "Task",
         return_query_loss: bool = False,
-    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], float]:
+        return_inner_losses: bool = False,
+    ):
         """True second-order MAML over LoRA + lm_head (FedLoRA-MAML).
 
         Uses higher.innerloop_ctx with track_higher_grads=True to retain the
@@ -393,6 +397,7 @@ class MAMLEngine:
 
         inner_params = self.model.get_outer_loop_params()
         inner_opt = torch.optim.SGD(inner_params, lr=self.inner_lr)
+        inner_step_losses: list[float] = []
 
         with higher.innerloop_ctx(
             self.model.model,
@@ -401,7 +406,7 @@ class MAMLEngine:
             track_higher_grads=True,
             override={"lr": [self.inner_lr]},
         ) as (fmodel, diffopt):
-                                                
+
             for _step in range(self.inner_steps):
                 step_losses = []
                 for audio, text in zip(task.support_audio, task.support_labels):
@@ -410,11 +415,11 @@ class MAMLEngine:
                     clipped = _clip_audio(audio, S)
                     if clipped is None:
                         del labels
-                        continue                                         
+                        continue
 
                     input_values = _encode_audio(clipped, self.processor, self.device, dtype)
                     out = fmodel(input_values=input_values)
-                    logits = out.logits                    
+                    logits = out.logits
                     T_frames = logits.shape[1]
 
                     loss_clip = ctc_loss_differentiable(
@@ -427,9 +432,11 @@ class MAMLEngine:
                     step_losses.append(loss_clip)
 
                 if not step_losses:
-                                                                                 
+                    inner_step_losses.append(float("nan"))
                     continue
-                diffopt.step(torch.stack(step_losses).mean())
+                step_mean = torch.stack(step_losses).mean()
+                inner_step_losses.append(step_mean.item())
+                diffopt.step(step_mean)
 
             query_losses = []
             for audio, text in zip(task.query_audio, task.query_labels):
@@ -455,11 +462,14 @@ class MAMLEngine:
                 query_losses.append(loss_clip)
 
             if not query_losses:
-                                                                         
                 outer_params_early = self.model.get_outer_loop_params()
                 result_zero = [torch.zeros_like(p) for p in outer_params_early]
+                if return_query_loss and return_inner_losses:
+                    return result_zero, 0.0, inner_step_losses
                 if return_query_loss:
                     return result_zero, 0.0
+                if return_inner_losses:
+                    return result_zero, inner_step_losses
                 return result_zero
 
             query_loss = torch.stack(query_losses).mean()
@@ -482,8 +492,12 @@ class MAMLEngine:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        if return_query_loss and return_inner_losses:
+            return result, query_loss_val, inner_step_losses
         if return_query_loss:
             return result, query_loss_val
+        if return_inner_losses:
+            return result, inner_step_losses
         return result
 
 def _perturb_lm_head(model_copy: nn.Module, noise_std: float = 0.3) -> None:

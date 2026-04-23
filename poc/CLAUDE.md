@@ -9,6 +9,96 @@ in any training round, and the base model must not have been pretrained on them.
 
 ---
 
+## SESSION HANDOFF — 2026-04-23
+
+### What was done
+
+**FedLoRA-MAML Phase 2 training is complete. 45 rounds over 2 GPU sessions.**
+
+#### Code changes (all committed)
+| File | Change |
+|------|--------|
+| `federated/client_lora.py` | Per-round diagnostics in `FitRes.metrics`: `query_loss`, `grad_norm`, `clip_coef`, `inner_loss_init`, `inner_loss_final`. `_MAX_GRAD_NORM` raised 20 → 50. `speaker_id` tag in stdout. |
+| `federated/strategy_maml.py` | Full MLflow integration via `Tracker`. Weighted-average client metrics logged each round. `round_offset` pattern — server reads offset from latest checkpoint filename so global round numbering survives session restarts. |
+| `federated/server_lora.py` | Computes `round_offset = int(last_ckpt.stem.split("_")[-1])`. Passes to `PerFedAvgStrategy`. Calls `strategy.close()` after training. |
+| `federated/run_node_lora.py` | Passes `speaker_id` to `MAMLClientLora`. |
+| `maml/engine.py` | Added `return_inner_losses: bool` flag to `compute_meta_gradient` — returns `(grads, query_loss, [step_losses])` 3-tuple when both flags are set. |
+| `maml/tracking.py` | Respects `MLFLOW_TRACKING_URI` env var (needed for Docker volume mount). |
+| `configs/vctk_lora_poc.yaml` | `cohort_fraction: 0.33` (4 nodes/round, ~60 GB peak on 80 GB A100; prevents OOM). |
+| `docker/docker-compose.vctk.yml` | `../mlruns:/app/mlruns` volume + `MLFLOW_TRACKING_URI=file:///app/mlruns` env var so MLflow data persists to host. |
+| `scripts/run_fedlora.sh` | New standalone script: `check / build / launch / logs / down / mlflow / all` subcommands. |
+| `scripts/analyse_run.py` | New analysis script. Merges 2 MLflow sessions (run IDs below), generates 5 diagnostic plots to `reports/analysis/`, logs to MLflow as `analysis_45rounds` run. |
+
+#### MLflow run IDs (experiment `fedlora_maml_vctk`, ID `242325055807434180`)
+| Run ID | Description |
+|--------|-------------|
+| `d0eb0c9277d54ba9921fb5b09dec7d18` | Session 1: rounds 1–23, `MAX_GRAD_NORM=20` |
+| `cbe3059e3f414e8f9ddeafc7d16fac67` | Session 2: rounds 21–45, `MAX_GRAD_NORM=50` |
+
+Analysis script merges: session1 rounds 1–20, session2 rounds 21–45.
+
+### Training status
+
+| Metric | Round 1 | Round 25 | Round 45 |
+|--------|---------|---------|---------|
+| Query CTC loss | 58.3 | 16.4 | **9.2** |
+| Inner loss k=0 | 58.6 | 27.9 | 18.0 |
+| Inner loss k=5 | 57.6 | 17.6 | 10.2 |
+| Adaptation efficiency | 1.6% | 37.1% | **43.4%** |
+| Grad norm | 50 | 154 | **20** |
+| Clip coef | 0.40 | 0.33 | **1.00** |
+
+**Convergence plateau reached.** Rounds 35–45: mean CTC ~9.2 (±1.5 sampling noise), grad norms 17–25 (well below clip threshold), no clipping for 20 consecutive rounds. Training is done.
+
+**Key event:** At round 26, after raising `MAX_GRAD_NORM` 20→50, the grad norm collapsed 154→44 in a single round and clipping ceased permanently. The model entered a flat basin.
+
+**Checkpoints saved:** `checkpoints/federated/theta_star_lora_round_{0010,0020,0030,0040}.pt`
+**Best checkpoint for evaluation:** `theta_star_lora_round_0040.pt` (1.3 MB, round 40)
+
+### CRITICAL: eval_lora.py mismatch — fix before running
+
+`evaluation/eval_lora.py` is **hard-coded for L2-ARCTIC**, which does not exist.
+Training ran on **VCTK**. The VCTK meta-test speakers are locked in `data/vctk_split.json`:
+
+```json
+"meta_test": ["p243", "p244", "p245", "p246"]
+```
+
+These 4 speakers have **never been prepared** — they are not in `data/vctk_nodes/`.
+
+**Steps required before eval:**
+
+1. **Prepare meta-test data** (run ONCE, never repeat):
+   ```bash
+   python data/prepare_vctk_lora.py --speakers p243 p244 p245 p246 --output_dir data/vctk_test_nodes
+   ```
+   Gate: 4 dirs under `data/vctk_test_nodes/`, each with `features.pt` + `labels.txt`, no `.pkl`, no `speaker_id`.
+
+2. **Adapt eval_lora.py for VCTK format.** The script currently loads raw WAV files from `data/l2arctic/{speaker}/wav/`. VCTK nodes use preprocessed `features.pt` tensors (List[Tensor], 16kHz, float32, [-1,1]). Replace the `load_speaker_clips()` function to read from `features.pt` / `labels.txt` instead.
+   Key paths to fix in `eval_lora.py`:
+   - `DEFAULT_CKPT` → `checkpoints/federated/theta_star_lora_round_0040.pt`
+   - `EVAL_CLIPS_FILE` → `data/vctk_split.json` (use `meta_test` field)
+   - `SPLIT_FILE` → `data/vctk_split.json`
+   - `L2ARCTIC_DIR` → `data/vctk_test_nodes`
+   - `load_speaker_clips()` → load from `features.pt` (torch.load) + `labels.txt` (text lines)
+   - Output file → `evaluation/results/fedlora_maml_vctk.json`
+
+3. **Run evaluation ONCE:**
+   ```bash
+   python evaluation/eval_lora.py --federated_ckpt checkpoints/federated/theta_star_lora_round_0040.pt
+   ```
+   Gate: `evaluation/results/fedlora_maml_vctk.json` exists with bootstrap CIs for all 4 baselines.
+
+4. **Required baselines** (all four, or results are uninterpretable):
+   - `WER_pretrained_k0` — wav2vec2 baseline, no adaptation
+   - `WER_pretrained_k5` — direct fine-tune baseline, 5 inner steps from pretrained
+   - `WER_federated_k0` — θ* zero-shot (tests meta-init quality)
+   - `WER_federated_k5` — θ* + 5 inner steps (the primary result)
+
+**Claim requires:** `WER_federated_k5 < WER_pretrained_k5` with non-overlapping 95% bootstrap CIs on ≥ 2/4 meta-test speakers.
+
+---
+
 ## Phase
 
 **Phase 1 — PoC (v0.1-poc)**. Tag `v0.1-poc` before adding Phase 2 features.
@@ -214,42 +304,36 @@ Arabic and Vietnamese L1 speakers are the hardest generalization challenge.
 
 ### Phase 2 Build Order
 
-- [ ] **STEP 0** — Lock speaker split and eval clips:
-  `python data/prepare_l2arctic_eval.py`
-  `git commit data/l2arctic_split.json data/l2arctic_eval_clips.json`
-  Gate: files exist with correct speakers
+- [x] **STEP 0** — Lock VCTK speaker split:
+  `data/vctk_split.json` committed. meta_test = [p243, p244, p245, p246].
 
-- [ ] **STEP 1** — LoRA model smoke-test:
-  `python models/lora_wav2vec2.py`
-  Gate: ~320K trainable params, second-order gradient flows, self-test passes
+- [x] **STEP 1** — LoRA model smoke-test: passed (~320K trainable params).
 
-- [ ] **STEP 2** — Gradient norm diagnostic:
-  `python data/diagnostics/run_lora_gradient_analysis.py`
-  Gate: norms documented in `data/diagnostics/lora_gradient_norms.json`
+- [x] **STEP 2** — Gradient norm diagnostic: completed. Set `inner_lr=1e-4`.
 
-- [ ] **STEP 3** — Verify engine integration:
-  `python -c "from maml.engine import MAMLEngine, MAMLConfig; cfg = MAMLConfig(mode='lora_maml'); print(cfg)"`
-  Gate: succeeds
+- [x] **STEP 3** — Engine integration: `lora_maml` mode verified end-to-end.
 
-- [ ] **STEP 4** — L2-ARCTIC data pipeline:
-  `python data/download_l2arctic.py --data_dir /path/to/l2arctic`
-  Gate: 16 node dirs, no pkl, no speaker_id, all at 16kHz
+- [x] **STEP 4** — VCTK data pipeline: 12 training nodes in `data/vctk_nodes/` (p225–p237 excl. p235).
 
-- [ ] **STEP 5** — Centralized validation (no Docker):
-  `python maml/meta_train.py --config configs/lora_poc.yaml`
-  Gate: meta-val WER at k=5 < k=0 on ≥ 3/4 val speakers; no NaN in meta-grads
+- [x] **STEP 5** — Federated training: **45 rounds complete**, converged.
+  Checkpoints: `checkpoints/federated/theta_star_lora_round_{0010,0020,0030,0040}.pt`
+  Best: `theta_star_lora_round_0040.pt`
 
-- [ ] **STEP 6** — Federated training (12 nodes, 30 rounds):
-  Gate: `checkpoints/lora_federated/theta_star_lora.pt` exists, no NaN
+- [ ] **STEP 6** — Prepare VCTK meta-test data (FIRST STEP FOR NEXT SESSION):
+  ```bash
+  python data/prepare_vctk_lora.py --speakers p243 p244 p245 p246 --output_dir data/vctk_test_nodes
+  ```
+  Gate: 4 dirs, `features.pt` + `labels.txt` each, no `.pkl`, no `speaker_id`.
 
-- [ ] **STEP 7** — Hyperparameter search on meta-val:
-  Gate: `data/hparam_log.json` populated, best config in `configs/lora_poc.yaml`
+- [ ] **STEP 7** — Fix `evaluation/eval_lora.py` for VCTK format (see Session Handoff above).
+  Gate: script runs to completion on dummy/random weights without errors.
 
-- [ ] **STEP 8** — Retrain with best hyperparameters
-
-- [ ] **STEP 9** — Final evaluation (meta-test, run ONCE):
-  `python evaluation/eval_lora.py`
-  Gate: `evaluation/results/fedlora_maml_l2arctic.json` exists with all 4 baselines
+- [ ] **STEP 8** — Final evaluation (run ONCE, on A100 or any GPU with ≥8 GB):
+  ```bash
+  python evaluation/eval_lora.py --federated_ckpt checkpoints/federated/theta_star_lora_round_0040.pt
+  ```
+  Gate: `evaluation/results/fedlora_maml_vctk.json` with 4 baselines + bootstrap CIs.
+  Document findings regardless of outcome.
 
 ---
 

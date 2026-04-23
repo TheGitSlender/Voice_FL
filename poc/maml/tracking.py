@@ -20,6 +20,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import warnings
 from pathlib import Path
 from typing import Any
@@ -51,7 +52,8 @@ class Tracker:
             )
             return
 
-        mlflow.set_tracking_uri(tracking_uri)
+        effective_uri = os.environ.get("MLFLOW_TRACKING_URI", tracking_uri)
+        mlflow.set_tracking_uri(effective_uri)
         mlflow.set_experiment(experiment_name)
         self._run = mlflow.start_run(run_name=run_name)
         self._active = True

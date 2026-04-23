@@ -13,6 +13,7 @@ The server never sees node data, speaker IDs, or lm_head parameters.
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
@@ -32,6 +33,18 @@ from flwr.server.client_proxy import ClientProxy
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
+from maml.tracking import Tracker
+
+# Metric keys that clients may send in FitRes.metrics
+_CLIENT_METRIC_KEYS = (
+    "query_loss",
+    "grad_norm",
+    "clip_coef",
+    "inner_loss_init",
+    "inner_loss_final",
+)
+
+
 class PerFedAvgStrategy(fl.server.strategy.Strategy):
     """
     Per-FedAvg: server maintains θ* and applies gradient descent each round.
@@ -44,6 +57,8 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
         checkpoint_dir:        if set, save θ* every `checkpoint_every` rounds
         checkpoint_every:      rounds between checkpoints (default 10)
         param_names:           parameter names for checkpoint state_dict keys
+        experiment_name:       MLflow experiment name
+        tracking_uri:          MLflow tracking URI (overridden by MLFLOW_TRACKING_URI env)
     """
 
     def __init__(
@@ -55,6 +70,9 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
         checkpoint_dir: Optional[str] = None,
         checkpoint_every: int = 10,
         param_names: Optional[List[str]] = None,
+        experiment_name: str = "fedlora_maml_vctk",
+        tracking_uri: str = "mlruns",
+        round_offset: int = 0,
     ):
         super().__init__()
         self.outer_lr = outer_lr
@@ -65,6 +83,20 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
         self._param_names = param_names
 
         self._theta_star: list[np.ndarray] = parameters_to_ndarrays(initial_parameters)
+        self._round_offset = round_offset
+
+        self._tracker = Tracker(
+            experiment_name=experiment_name,
+            run_name="federated_run",
+            tracking_uri=tracking_uri,
+        )
+        self._tracker.log_params({
+            "outer_lr": outer_lr,
+            "min_available_clients": min_available_clients,
+            "fraction_fit": fraction_fit,
+            "checkpoint_every": checkpoint_every,
+            "n_params": len(self._theta_star),
+        })
 
     def initialize_parameters(self, client_manager) -> Optional[Parameters]:
         return ndarrays_to_parameters(self._theta_star)
@@ -73,14 +105,13 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
         self, server_round: int, parameters: Parameters, client_manager
     ) -> List[Tuple[ClientProxy, FitIns]]:
         # Block until min_available_clients have connected, then sample
-        # fraction_fit of them. With fraction_fit=1.0 this is identical to
-        # the old behaviour (samples all min_available_clients each round).
+        # fraction_fit of them.
         num_sample = max(1, int(self.fraction_fit * self.min_available_clients))
         clients = client_manager.sample(
             num_clients=num_sample,
             min_num_clients=self.min_available_clients,
         )
-        fit_ins = FitIns(parameters=parameters, config={"round": server_round})
+        fit_ins = FitIns(parameters=parameters, config={"round": server_round + self._round_offset})
         return [(c, fit_ins) for c in clients]
 
     def aggregate_fit(
@@ -91,25 +122,41 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
         import gc
 
+        global_round = server_round + self._round_offset
+
         if not results:
-            print(f"  [server] Round {server_round}: no results received")
+            print(f"  [server] Round {global_round}: no results received")
             return None, {}
 
         if failures:
-            print(f"  [server] Round {server_round}: {len(failures)} client failures")
+            print(f"  [server] Round {global_round}: {len(failures)} client failures")
 
         n_params = len(self._theta_star)
         acc_grads = [np.zeros(t.shape, dtype=np.float32) for t in self._theta_star]
         total_weight = 0
+
+        # Accumulators for weighted-average client diagnostics
+        metric_sums: dict[str, float] = {k: 0.0 for k in _CLIENT_METRIC_KEYS}
+        metric_weights: dict[str, float] = {k: 0.0 for k in _CLIENT_METRIC_KEYS}
 
         for _client, fit_res in results:
             grads = parameters_to_ndarrays(fit_res.parameters)
             w = fit_res.num_examples
             total_weight += w
             for i, g in enumerate(grads):
-                                                                              
                 acc_grads[i] += w * g.astype(np.float32)
-                                                           
+
+            for k in _CLIENT_METRIC_KEYS:
+                raw = fit_res.metrics.get(k)
+                if raw is not None:
+                    try:
+                        fv = float(raw)
+                        if not math.isnan(fv):
+                            metric_sums[k] += fv * w
+                            metric_weights[k] += w
+                    except (TypeError, ValueError):
+                        pass
+
             del grads, fit_res
             gc.collect()
 
@@ -120,17 +167,39 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
         del acc_grads
         gc.collect()
 
+        avg_m: dict[str, float] = {
+            k: metric_sums[k] / metric_weights[k] if metric_weights[k] > 0 else float("nan")
+            for k in _CLIENT_METRIC_KEYS
+        }
+
         print(
-            f"  [server] Round {server_round}: aggregated {len(results)} clients | "
-            f"β={self.outer_lr} | total_examples={total_weight}"
+            f"  [server] Round {global_round}: aggregated {len(results)} clients | "
+            f"β={self.outer_lr} | total_examples={total_weight} | "
+            f"avg_query_loss={avg_m['query_loss']:.4f} | "
+            f"avg_grad_norm={avg_m['grad_norm']:.4f} | "
+            f"inner {avg_m['inner_loss_init']:.4f}→{avg_m['inner_loss_final']:.4f}"
+        )
+
+        self._tracker.log_metrics(
+            {
+                "server/n_clients": float(len(results)),
+                "server/total_examples": float(total_weight),
+                "server/outer_lr": self.outer_lr,
+                "client/avg_query_loss": avg_m["query_loss"],
+                "client/avg_grad_norm": avg_m["grad_norm"],
+                "client/avg_clip_coef": avg_m["clip_coef"],
+                "client/avg_inner_loss_init": avg_m["inner_loss_init"],
+                "client/avg_inner_loss_final": avg_m["inner_loss_final"],
+            },
+            step=global_round,
         )
 
         if (
             self._checkpoint_dir is not None
             and self._param_names is not None
-            and server_round % self._checkpoint_every == 0
+            and global_round % self._checkpoint_every == 0
         ):
-            self._save_checkpoint(server_round)
+            self._save_checkpoint(global_round)
 
         updated_params = ndarrays_to_parameters(self._theta_star)
         return updated_params, {"round": server_round}
@@ -145,6 +214,7 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
         }
         torch.save(state_dict, path)
         print(f"  [server] Checkpoint saved: {path.name}", flush=True)
+        self._tracker.log_artifact(path)
 
     def configure_evaluate(self, server_round, parameters, client_manager):
         """Evaluation handled externally by eval_poc.py."""
@@ -155,3 +225,7 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
 
     def evaluate(self, server_round, parameters):
         return None
+
+    def close(self) -> None:
+        """End the MLflow run. Call after fl.server.start_server() returns."""
+        self._tracker.end()
