@@ -1,34 +1,9 @@
-"""
-MAML engine — FOMAML + ANIL (native PyTorch, no learn2learn at runtime).
-
-compute_meta_gradient() runs K inner-loop steps on the support set (adapting
-lm_head only), evaluates on the query set, and returns the outer-loop gradient
-with respect to the ENCODER parameters only.
-
-Modes:
-  - "fomaml" (default): first-order approximation, no computation graph retained.
-    Uses copy.deepcopy + manual SGD. Runs on RTX 4070 Super.
-  - "second_order_ctc": true second-order MAML via higher.innerloop_ctx +
-    custom differentiable CTC (ctc/differentiable_ctc.py). Requires higher>=0.2.1.
-    The custom CTC replaces nn.CTCLoss with pure PyTorch ops that support
-    double-backward (logsumexp, gather, cat, where). ~3-10x slower than FOMAML.
-
-Algorithm: ANIL
-  - Inner loop: adapt lm_head only (support set)
-  - Outer loop: encoder meta-gradients (query set)
-  - Gradients returned detached; caller applies them to the original model
-  - Clips processed one at a time (batch_size=1, VRAM budget 3.5 GB/node)
-
-Invariant I4: returns gradients, never weight updates.
-Invariant I6: encoder.requires_grad stays True throughout.
-"""
+"""MAML engine — FOMAML, second-order CTC, and LoRA-MAML modes."""
 
 from __future__ import annotations
 
 import copy
-import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -38,7 +13,7 @@ if TYPE_CHECKING:
     from data.task_sampler import Task
     from models.wav2vec2_maml import Wav2Vec2MAML
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+_SAMPLE_RATE = 16_000
 
 @dataclass
 class MAMLConfig:
@@ -64,7 +39,7 @@ def _encode_audio(
     arr = audio_tensor.float().numpy()
     inputs = processor(
         arr,
-        sampling_rate=16000,
+        sampling_rate=_SAMPLE_RATE,
         return_tensors="pt",
         padding=False,
     )
@@ -87,12 +62,7 @@ def _accumulate_grads_over_clips(
 ) -> tuple[list[torch.Tensor], float]:
     """Compute mean gradient of CTC loss w.r.t. params, one clip at a time.
 
-    Processes clips sequentially and frees each computation graph immediately,
-    keeping peak VRAM to a single clip's graph rather than all clips at once.
-    Full-length clips are used (no truncation) to avoid CTC label-length issues.
-
-    Returns:
-        (grad_list, mean_loss_scalar)
+    Returns: (grad_list, mean_loss_scalar)
     """
     acc_grads = [torch.zeros_like(p) for p in params]
     total_loss = 0.0
@@ -129,22 +99,13 @@ _VALID_MODES = ("fomaml", "second_order_ctc", "lora_maml")
 
 class MAMLEngine:
     """
-    MAML + ANIL engine for one episode.
-
-    Supports three modes:
-      - "fomaml"          first-order approximation (default, fast, RTX 4070 Super).
-                          model must be Wav2Vec2MAML.
-      - "second_order_ctc" true second-order via higher + custom differentiable CTC.
-                          model must be Wav2Vec2MAML.
-      - "lora_maml"       true second-order MAML over LoRA weights only (~295K params).
-                          model must be LoRAWav2Vec2. Inner loop adapts LoRA + lm_head;
-                          outer loop meta-gradients target LoRA only (for FL).
+    MAML engine for one episode (FOMAML, second_order_ctc, or lora_maml mode).
 
     Args:
         model:       Wav2Vec2MAML or LoRAWav2Vec2 instance
         processor:   Wav2Vec2Processor
-        inner_steps: k (default 3)
-        inner_lr:    α (default 1e-4)
+        inner_steps: k inner-loop adaptation steps
+        inner_lr:    inner-loop learning rate α
         device:      torch device
         mode:        one of "fomaml", "second_order_ctc", "lora_maml"
     """
@@ -329,11 +290,8 @@ class MAMLEngine:
         )
 
         result = []
-        for g in meta_grads_raw:
-            if g is not None:
-                result.append(g.clone().detach())
-            else:
-                result.append(torch.zeros(1, device=self.device))
+        for p, g in zip(encoder_params, meta_grads_raw):
+            result.append(g.clone().detach() if g is not None else torch.zeros_like(p))
 
         query_loss_val = query_loss.item()
 
@@ -428,7 +386,7 @@ class MAMLEngine:
                         torch.tensor([T_frames], device=self.device),
                         torch.tensor([S], device=self.device),
                         blank=0,
-                    )
+                    ) / max(S, 1)  # normalize by label count → per-token loss
                     step_losses.append(loss_clip)
 
                 if not step_losses:
@@ -437,6 +395,35 @@ class MAMLEngine:
                 step_mean = torch.stack(step_losses).mean()
                 inner_step_losses.append(step_mean.item())
                 diffopt.step(step_mean)
+
+            # Measure support loss at the final adapted state (θ_k).
+            # The loop above logs pre-step losses only, so without this we'd
+            # never see whether the last gradient step actually helped.
+            final_sup_losses = []
+            for audio, text in zip(task.support_audio, task.support_labels):
+                labels = _encode_labels(text, self.processor, self.device)
+                S = int((labels[0] != -100).sum().item())
+                clipped = _clip_audio(audio, S)
+                if clipped is None:
+                    del labels
+                    continue
+                input_values = _encode_audio(clipped, self.processor, self.device, dtype)
+                with torch.no_grad():
+                    out = fmodel(input_values=input_values)
+                logits = out.logits
+                T_frames = logits.shape[1]
+                loss_clip = ctc_loss_differentiable(
+                    logits,
+                    labels,
+                    torch.tensor([T_frames], device=self.device),
+                    torch.tensor([S], device=self.device),
+                    blank=0,
+                ) / max(S, 1)
+                final_sup_losses.append(loss_clip.item())
+            if final_sup_losses:
+                inner_step_losses.append(sum(final_sup_losses) / len(final_sup_losses))
+            else:
+                inner_step_losses.append(float("nan"))
 
             query_losses = []
             for audio, text in zip(task.query_audio, task.query_labels):
@@ -458,7 +445,7 @@ class MAMLEngine:
                     torch.tensor([T_frames], device=self.device),
                     torch.tensor([S], device=self.device),
                     blank=0,
-                )
+                ) / max(S, 1)  # normalize by label count — consistent with inner loop
                 query_losses.append(loss_clip)
 
             if not query_losses:
@@ -501,17 +488,7 @@ class MAMLEngine:
         return result
 
 def _perturb_lm_head(model_copy: nn.Module, noise_std: float = 0.3) -> None:
-    """Add Gaussian noise to lm_head weights to simulate a new-speaker head.
-
-    ANIL evaluation protocol: the meta-trained encoder (θ*) is tested from
-    a perturbed lm_head, not from the already-trained global head.  This
-    isolates the encoder's contribution: a few adaptation steps should pull
-    the noisy head back toward the speaker-specific optimum, demonstrating
-    that the meta-trained encoder enables rapid adaptation.
-
-    Without perturbation, wav2vec2-base-960h already achieves ~1% WER on
-    LibriSpeech; k=3 steps cannot visibly improve an already-near-perfect head.
-    """
+    """Add Gaussian noise N(0, noise_std²) to lm_head weights."""
     with torch.no_grad():
         for p in model_copy.lm_head.parameters():
             p.add_(noise_std * torch.randn_like(p))
@@ -524,15 +501,7 @@ def compute_wer_k0(
     device: torch.device,
     perturb_lm_head_std: float = 0.0,
 ) -> float:
-    """WER with zero adaptation steps (no perturbation by default).
-
-    perturb_lm_head_std=0.0 is the correct default for evaluating on genuinely
-    unseen speakers (VCTK). The pretrained model has NOT seen these speakers,
-    so the k=0 WER gap is real without needing artificial noise injection.
-
-    Set perturb_lm_head_std > 0 only if you explicitly need the legacy ANIL
-    noise-recovery protocol (not recommended for valid meta-learning evaluation).
-    """
+    """WER with zero adaptation steps."""
     from jiwer import wer as _wer
 
     model_copy = copy.deepcopy(model)
@@ -563,12 +532,7 @@ def compute_wer_k3(
     device: torch.device = torch.device("cpu"),
     perturb_lm_head_std: float = 0.0,
 ) -> float:
-    """WER after k inner-loop adaptation steps on support set (no perturbation by default).
-
-    The name 'k3' is historical; pass any inner_steps value.
-    With perturb_lm_head_std=0.0 (default), this evaluates genuine adaptation
-    to an unseen speaker from the VCTK dataset.
-    """
+    """WER after k inner-loop adaptation steps on support set. Name 'k3' is historical."""
     from jiwer import wer as _wer
 
     model_copy = copy.deepcopy(model)

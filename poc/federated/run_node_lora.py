@@ -38,7 +38,7 @@ def parse_args():
 
 
 def load_config(path: str | None) -> dict:
-    import yaml
+    from maml import _load_yaml
 
     defaults = {
         "server_address": "server:8080",
@@ -49,14 +49,13 @@ def load_config(path: str | None) -> dict:
         "query_size": 30,
         "tasks_per_node": 4,
         "max_audio_samples": None,
+        "max_grad_norm": 50.0,
     }
     if path is None:
         return defaults
-    with open(path) as f:
-        cfg = yaml.safe_load(f)
+    cfg = _load_yaml(path)
 
     maml_cfg = cfg.get("maml", {})
-    # Config uses `k` as the alias for inner_steps
     if "k" in maml_cfg and "inner_steps" not in maml_cfg:
         maml_cfg["inner_steps"] = maml_cfg.pop("k")
     defaults.update(maml_cfg)
@@ -117,6 +116,7 @@ def main():
         tasks_per_node=cfg["tasks_per_node"],
         max_audio_samples=cfg.get("max_audio_samples"),
         speaker_id=speaker_id,
+        max_grad_norm=cfg["max_grad_norm"],
     )
 
     # Poll until the Flower server is reachable

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Phase 1 (FOMAML-ANIL) only. For Phase 2 (FedLoRA-MAML), use run_fedlora.sh.
 # Run the full 20-round federated PoC.
 # Run from the repo root: ./scripts/run_poc.sh
 #

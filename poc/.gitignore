@@ -10,7 +10,6 @@ data/speaker_selection.json
 .env
 .env.*
 .env.nodes
-.env.example
 
 mlruns/
 mlartifacts/

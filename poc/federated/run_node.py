@@ -31,7 +31,7 @@ def parse_args():
     return p.parse_args()
 
 def load_config(path: str | None) -> dict:
-    import yaml
+    from maml import _load_yaml
     defaults = {
         "server_address": "server:8080",
         "device": "cpu",
@@ -39,12 +39,12 @@ def load_config(path: str | None) -> dict:
         "inner_lr": 1e-4,
         "support_size": 8,
         "query_size": 8,
+        "max_grad_norm": 10.0,
         "nodes_dir": "/data",
     }
     if path is None:
         return defaults
-    with open(path) as f:
-        cfg = yaml.safe_load(f)
+    cfg = _load_yaml(path)
     defaults.update(cfg.get("node", {}))
     defaults.update(cfg.get("maml", {}))
     return defaults
@@ -90,6 +90,7 @@ def main():
         inner_lr=cfg["inner_lr"],
         support_size=cfg["support_size"],
         query_size=cfg["query_size"],
+        max_grad_norm=cfg["max_grad_norm"],
     )
 
     import socket

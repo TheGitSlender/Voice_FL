@@ -1,22 +1,6 @@
-"""
-Flower client for FOMAML-ANIL federated learning.
-
-What this client does each round:
-  1. Receive θ* (encoder weights) from server via set_parameters()
-  2. Load them into local model
-  3. Run compute_meta_gradient() on a fresh task
-  4. Return meta-gradients (encoded as numpy arrays) to server
-
-What this client does NOT do:
-  - It does NOT return updated weights (Invariant I4)
-  - It does NOT include lm_head in get_parameters() (Invariant I3)
-  - It does NOT transmit any audio data or speaker identity (Invariants I1, I2)
-"""
+"""Flower client for FOMAML-ANIL. Returns encoder meta-gradients per round."""
 
 from __future__ import annotations
-
-import sys
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -33,22 +17,12 @@ from flwr.common import (
     parameters_to_ndarrays,
 )
 
-ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
-
 from models.wav2vec2_maml import Wav2Vec2MAML, load_processor
 from data.task_sampler import VoiceTaskSampler
 from maml.engine import MAMLEngine
 
 class MAMLClient(fl.client.Client):
-    """
-    Flower client implementing PerFedAvg protocol.
-
-    Each call to fit():
-      - Loads θ* from server
-      - Runs one FOMAML episode (support + query)
-      - Returns encoder meta-gradients (same shape as encoder weights)
-    """
+    """Flower client implementing PerFedAvg (FOMAML-ANIL)."""
 
     def __init__(
         self,
@@ -58,6 +32,7 @@ class MAMLClient(fl.client.Client):
         inner_lr: float = 1e-4,
         support_size: int = 8,
         query_size: int = 8,
+        max_grad_norm: float = 10.0,
     ):
         self.device = torch.device(device)
         self.model = Wav2Vec2MAML(device=self.device)
@@ -72,15 +47,12 @@ class MAMLClient(fl.client.Client):
         self.engine = MAMLEngine(
             self.model, self.processor, inner_steps, inner_lr, self.device
         )
+        self._max_grad_norm = max_grad_norm
 
         print(f"[client] Node dir: {Path(node_dir).name[:16]} | clips: {self.sampler.num_clips}")
 
     def get_parameters(self, ins: GetParametersIns) -> GetParametersRes:
-        """Return encoder weights (lm_head EXCLUDED — Invariant I3).
-
-        Uses float16 for wire transfer to halve message size (~189 MB vs 378 MB),
-        reducing peak gRPC buffer pressure when 5 clients are served concurrently.
-        """
+        """Return encoder weights as float16 (lm_head excluded — Invariant I3)."""
         ndarrays = [
             p.detach().half().cpu().numpy()
             for p in self.model.get_outer_loop_params()
@@ -116,8 +88,7 @@ class MAMLClient(fl.client.Client):
         meta_grads = self.engine.compute_meta_gradient(task)
 
         total_norm = sum(g.float().norm() ** 2 for g in meta_grads) ** 0.5
-        max_norm = 10.0
-        clip_coef = max_norm / (total_norm.item() + 1e-6)
+        clip_coef = self._max_grad_norm / (total_norm.item() + 1e-6)
         if clip_coef < 1.0:
             meta_grads = [g * clip_coef for g in meta_grads]
 

@@ -14,8 +14,6 @@ The server never sees node data, speaker IDs, or lm_head parameters.
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -29,9 +27,6 @@ from flwr.common import (
     parameters_to_ndarrays,
 )
 from flwr.server.client_proxy import ClientProxy
-
-ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
 
 from maml.tracking import Tracker
 
@@ -73,9 +68,18 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
         experiment_name: str = "fedlora_maml_vctk",
         tracking_uri: str = "mlruns",
         round_offset: int = 0,
+        # AdamW outer optimizer hyperparameters
+        adam_beta1: float = 0.9,
+        adam_beta2: float = 0.999,
+        adam_eps: float = 1e-8,
+        weight_decay: float = 1e-4,
+        # Cosine LR schedule with linear warmup
+        total_rounds: int = 200,
+        warmup_rounds: int = 20,
     ):
         super().__init__()
-        self.outer_lr = outer_lr
+        self.base_outer_lr = outer_lr
+        self.outer_lr = outer_lr  # updated each round by schedule
         self.fraction_fit = fraction_fit
         self.min_available_clients = min_available_clients
         self._checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
@@ -85,6 +89,19 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
         self._theta_star: list[np.ndarray] = parameters_to_ndarrays(initial_parameters)
         self._round_offset = round_offset
 
+        # AdamW moment buffers.
+        self._adam_m: list[np.ndarray] = [np.zeros_like(t, dtype=np.float32) for t in self._theta_star]
+        self._adam_v: list[np.ndarray] = [np.zeros_like(t, dtype=np.float32) for t in self._theta_star]
+        self._adam_t: int = 0
+        self._adam_beta1 = adam_beta1
+        self._adam_beta2 = adam_beta2
+        self._adam_eps = adam_eps
+        self._weight_decay = weight_decay
+
+        # LR schedule
+        self._total_rounds = total_rounds
+        self._warmup_rounds = warmup_rounds
+
         self._tracker = Tracker(
             experiment_name=experiment_name,
             run_name="federated_run",
@@ -92,11 +109,25 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
         )
         self._tracker.log_params({
             "outer_lr": outer_lr,
+            "adam_beta1": adam_beta1,
+            "adam_beta2": adam_beta2,
+            "weight_decay": weight_decay,
+            "warmup_rounds": warmup_rounds,
+            "total_rounds": total_rounds,
             "min_available_clients": min_available_clients,
             "fraction_fit": fraction_fit,
             "checkpoint_every": checkpoint_every,
             "n_params": len(self._theta_star),
         })
+
+    def _schedule_lr(self, global_round: int) -> float:
+        """Cosine decay with linear warmup."""
+        if global_round <= self._warmup_rounds:
+            return self.base_outer_lr * global_round / max(self._warmup_rounds, 1)
+        progress = (global_round - self._warmup_rounds) / max(
+            self._total_rounds - self._warmup_rounds, 1
+        )
+        return self.base_outer_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
 
     def initialize_parameters(self, client_manager) -> Optional[Parameters]:
         return ndarrays_to_parameters(self._theta_star)
@@ -160,9 +191,25 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
             del grads, fit_res
             gc.collect()
 
+        # AdamW outer update with cosine LR schedule
+        self.outer_lr = self._schedule_lr(global_round)
+        self._adam_t += 1
+        t = self._adam_t
+        b1, b2, eps = self._adam_beta1, self._adam_beta2, self._adam_eps
+
         for i in range(n_params):
-            avg = acc_grads[i] / total_weight
-            self._theta_star[i] = self._theta_star[i].astype(np.float32) - self.outer_lr * avg
+            g = acc_grads[i] / total_weight
+            # Bias-corrected Adam moments
+            self._adam_m[i] = b1 * self._adam_m[i] + (1.0 - b1) * g
+            self._adam_v[i] = b2 * self._adam_v[i] + (1.0 - b2) * g * g
+            m_hat = self._adam_m[i] / (1.0 - b1 ** t)
+            v_hat = self._adam_v[i] / (1.0 - b2 ** t)
+            theta = self._theta_star[i].astype(np.float32)
+            # AdamW: weight decay applied to parameter, not gradient
+            self._theta_star[i] = (
+                theta * (1.0 - self.outer_lr * self._weight_decay)
+                - self.outer_lr * m_hat / (np.sqrt(v_hat) + eps)
+            )
 
         del acc_grads
         gc.collect()
@@ -174,7 +221,7 @@ class PerFedAvgStrategy(fl.server.strategy.Strategy):
 
         print(
             f"  [server] Round {global_round}: aggregated {len(results)} clients | "
-            f"β={self.outer_lr} | total_examples={total_weight} | "
+            f"β={self.outer_lr:.2e} | total_examples={total_weight} | "
             f"avg_query_loss={avg_m['query_loss']:.4f} | "
             f"avg_grad_norm={avg_m['grad_norm']:.4f} | "
             f"inner {avg_m['inner_loss_init']:.4f}→{avg_m['inner_loss_final']:.4f}"

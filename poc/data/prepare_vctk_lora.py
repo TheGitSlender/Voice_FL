@@ -112,12 +112,15 @@ def _resample(audio_array, source_sr: int) -> torch.Tensor:
     arr = np.array(audio_array, dtype=np.float32)
 
     if source_sr != TARGET_SR:
-        import torchaudio
-        resampler = torchaudio.transforms.Resample(
-            orig_freq=source_sr, new_freq=TARGET_SR
-        )
-        t = torch.tensor(arr).unsqueeze(0)
-        arr = resampler(t).squeeze(0).numpy().astype(np.float32)
+        try:
+            import torchaudio
+            resampler = torchaudio.transforms.Resample(orig_freq=source_sr, new_freq=TARGET_SR)
+            arr = resampler(torch.tensor(arr).unsqueeze(0)).squeeze(0).numpy().astype(np.float32)
+        except OSError:
+            from math import gcd
+            from scipy.signal import resample_poly
+            g = gcd(TARGET_SR, source_sr)
+            arr = resample_poly(arr, TARGET_SR // g, source_sr // g).astype(np.float32)
 
     max_val = np.abs(arr).max()
     normalized = arr / (max_val + 1e-8)

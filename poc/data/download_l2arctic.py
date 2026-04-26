@@ -50,7 +50,6 @@ import shutil
 from pathlib import Path
 
 import torch
-import torchaudio
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -78,15 +77,32 @@ def resample_wav(
     target_sr: int = TARGET_SR,
 ) -> None:
     """Load a WAV file, resample to target_sr, and save."""
-    waveform, sr = torchaudio.load(str(src))
-    if sr != target_sr:
-        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sr)
-        waveform = resampler(waveform)
-                                          
-    if waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
-    waveform = waveform.clamp(-1.0, 1.0)
-    torchaudio.save(str(dst), waveform, target_sr)
+    try:
+        import torchaudio
+        waveform, sr = torchaudio.load(str(src))
+        if sr != target_sr:
+            waveform = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sr)(waveform)
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+        waveform = waveform.clamp(-1.0, 1.0)
+        torchaudio.save(str(dst), waveform, target_sr)
+    except OSError:
+        from math import gcd
+        import numpy as np
+        from scipy.io import wavfile
+        from scipy.signal import resample_poly
+        sr, data = wavfile.read(str(src))
+        data = data.astype(np.float32)
+        if data.ndim == 2:
+            data = data.mean(axis=1)
+        if sr != target_sr:
+            g = gcd(target_sr, sr)
+            data = resample_poly(data, target_sr // g, sr // g).astype(np.float32)
+        max_val = np.abs(data).max()
+        if max_val > 0:
+            data = data / max_val
+        # Save as 16-bit PCM WAV via scipy
+        wavfile.write(str(dst), target_sr, (data * 32767).astype(np.int16))
 
 def parse_transcript_file(transcript_path: Path) -> dict[str, str]:
     """
@@ -185,7 +201,8 @@ def verify_output(output_dir: Path) -> bool:
                 continue
 
             try:
-                _, sr = torchaudio.load(str(wavs[0]))
+                from scipy.io import wavfile as _wf
+                sr, _ = _wf.read(str(wavs[0]))
                 if sr != TARGET_SR:
                     log.error(f"{wavs[0]}: sr={sr}, expected {TARGET_SR}")
                     ok = False

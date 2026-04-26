@@ -1,24 +1,8 @@
-"""
-Flower client for FedLoRA-MAML (Phase 2).
-
-Each round:
-  1. Receive LoRA + lm_head weights (θ*) from server via set_parameters()
-  2. Run `tasks_per_node` lora_maml episodes, average meta-gradients
-  3. Return averaged gradients (LoRA + lm_head shapes) to server
-
-FitRes.metrics carries per-round diagnostics back to the server:
-  query_loss        — weighted-average query CTC loss across tasks
-  grad_norm         — meta-gradient norm before global clip
-  clip_coef         — gradient clip coefficient (1.0 = no clip applied)
-  inner_loss_init   — mean support loss at inner step 0 (convergence start)
-  inner_loss_final  — mean support loss at final inner step (convergence end)
-"""
+"""Flower client for FedLoRA-MAML. Returns meta-gradients and per-round diagnostics."""
 
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -35,31 +19,13 @@ from flwr.common import (
     parameters_to_ndarrays,
 )
 
-ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
-
 from models.lora_wav2vec2 import LoRAWav2Vec2, load_processor
 from data.task_sampler import VoiceTaskSampler
 from maml.engine import MAMLEngine
 
-_MAX_GRAD_NORM = 50.0
-
 
 class MAMLClientLora(fl.client.Client):
-    """
-    Flower client implementing PerFedAvg for FedLoRA-MAML.
-
-    Each call to fit():
-      - Loads LoRA + lm_head weights (θ*) from server
-      - Runs tasks_per_node independent lora_maml episodes
-      - Averages meta-gradients across episodes
-      - Returns gradient-clipped average (same shapes as LoRA + lm_head params)
-      - Returns per-round diagnostics in FitRes.metrics
-
-    higher.innerloop_ctx(copy_initial_weights=False) does NOT modify the
-    original model's .data — after each episode the model still holds θ*.
-    Running multiple tasks sequentially from the same θ* is therefore safe.
-    """
+    """Flower client implementing PerFedAvg for FedLoRA-MAML."""
 
     def __init__(
         self,
@@ -72,11 +38,17 @@ class MAMLClientLora(fl.client.Client):
         tasks_per_node: int = 4,
         max_audio_samples: int | None = None,
         speaker_id: str = "",
+        max_grad_norm: float = 50.0,
     ):
         self.device = torch.device(device)
         self._tag = f"[node/{speaker_id}]" if speaker_id else "[node]"
+        self._inner_steps = inner_steps
+        self._inner_lr = inner_lr
+        self._max_audio_samples = max_audio_samples
 
-        self.model = LoRAWav2Vec2(device=self.device)
+        # Model stays on CPU between rounds; moved to GPU only during fit()
+        # so all 12 containers coexist without exhausting VRAM.
+        self.model = LoRAWav2Vec2(device="cpu")
         self.processor = load_processor()
         self.sampler = VoiceTaskSampler(node_dir, support_size, query_size)
         self.engine = MAMLEngine(
@@ -84,11 +56,12 @@ class MAMLClientLora(fl.client.Client):
             self.processor,
             inner_steps=inner_steps,
             inner_lr=inner_lr,
-            device=self.device,
+            device=torch.device("cpu"),  # updated to GPU at fit() time
             mode="lora_maml",
             max_audio_samples=max_audio_samples,
         )
         self.tasks_per_node = tasks_per_node
+        self._max_grad_norm = max_grad_norm
 
         print(
             f"{self._tag} clips={self.sampler.num_clips} | "
@@ -97,10 +70,22 @@ class MAMLClientLora(fl.client.Client):
             flush=True,
         )
 
+    def _move_to_gpu(self) -> None:
+        """Move model and engine to GPU before a fit() call."""
+        self.model.model.to(self.device)
+        self.engine.device = self.device
+
+    def _move_to_cpu(self) -> None:
+        """Return model to CPU and free GPU cache after a fit() call."""
+        self.model.model.to("cpu")
+        self.engine.device = torch.device("cpu")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def get_parameters(self, ins: GetParametersIns) -> GetParametersRes:
-        """Return LoRA + lm_head weights as float16 (halves wire size)."""
+        """Return LoRA + lm_head weights as float32."""
         ndarrays = [
-            p.detach().half().cpu().numpy()
+            p.detach().float().cpu().numpy()
             for p in self.model.get_outer_loop_params()
         ]
         return GetParametersRes(
@@ -119,7 +104,8 @@ class MAMLClientLora(fl.client.Client):
             )
         with torch.no_grad():
             for p, arr in zip(outer_params, ndarrays):
-                p.copy_(torch.tensor(arr, dtype=p.dtype, device=self.device))
+                # p.device reflects wherever the model currently lives (cpu or gpu)
+                p.copy_(torch.tensor(arr, dtype=p.dtype, device=p.device))
 
     def fit(self, ins: FitIns) -> FitRes:
         """
@@ -128,6 +114,7 @@ class MAMLClientLora(fl.client.Client):
         Logs per-task inner-loop convergence and outer query loss to stdout.
         Returns diagnostic metrics in FitRes.metrics for server-side MLflow logging.
         """
+        self._move_to_gpu()
         self.set_parameters(ins.parameters)
         server_round = int(ins.config.get("round", 0))
 
@@ -183,7 +170,7 @@ class MAMLClientLora(fl.client.Client):
         # Global gradient norm clip
         total_norm_sq = sum(g.float().norm() ** 2 for g in avg_grads)
         total_norm = float(total_norm_sq ** 0.5)
-        clip_coef = min(1.0, _MAX_GRAD_NORM / (total_norm + 1e-6))
+        clip_coef = min(1.0, self._max_grad_norm / (total_norm + 1e-6))
         if clip_coef < 1.0:
             for g in avg_grads:
                 g.mul_(clip_coef)
@@ -213,13 +200,12 @@ class MAMLClientLora(fl.client.Client):
             flush=True,
         )
 
-        grad_arrays = [g.half().cpu().numpy() for g in avg_grads]
+        grad_arrays = [g.float().cpu().numpy() for g in avg_grads]
         num_examples = self.tasks_per_node * (
             self.sampler.support_size + self.sampler.query_size
         )
 
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        self._move_to_cpu()
 
         return FitRes(
             status=Status(code=Code.OK, message=""),

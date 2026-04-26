@@ -44,6 +44,8 @@ sys.path.insert(0, str(ROOT))
 RESULTS_DIR = ROOT / "evaluation" / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
+_SAMPLE_RATE = 16_000
+
 PASS_STR = "\033[32mPASS\033[0m"
 FAIL_STR = "\033[31mFAIL\033[0m"
 INFO_STR = "\033[33mINFO\033[0m"
@@ -136,7 +138,7 @@ def wer_per_clip(
     with torch.no_grad():
         for audio, ref in zip(audio_clips, texts):
             arr = audio.float().numpy()
-            iv = processor(arr, sampling_rate=16000, return_tensors="pt",
+            iv = processor(arr, sampling_rate=_SAMPLE_RATE, return_tensors="pt",
                            padding=False).input_values.to(device=device, dtype=dtype)
             out = model_copy.model(input_values=iv)
             hyp = processor.batch_decode(torch.argmax(out.logits, dim=-1))[0]

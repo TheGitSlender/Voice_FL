@@ -1,15 +1,33 @@
 {
   "meta_train": {
-    "RRBI": "hi", "HQTV": "hi", "TNI": "hi", "NCC": "hi",
-    "YKWK": "ko", "ERMS": "ko", "EBVS": "ko", "HJK": "ko",
-    "MBMPS": "zh", "HKK": "zh", "BWC": "zh", "LXC": "zh"
+    "RRBI":  "hi",
+    "TNI":   "hi",
+    "HQTV":  "vi",
+    "PNV":   "vi",
+    "BWC":   "zh",
+    "LXC":   "zh",
+    "YKWK":  "ko",
+    "HJK":   "ko",
+    "ERMS":  "es",
+    "EBVS":  "es",
+    "ZHAA":  "ar",
+    "SKA":   "ar"
   },
   "meta_val": {
-    "SVBI": "es", "NJS": "es", "TXHC": "es", "ZHAA": "es"
+    "SVBI":  "hi",
+    "TLV":   "vi",
+    "NCC":   "zh",
+    "HKK":   "ko",
+    "MBMPS": "es",
+    "ABA":   "ar"
   },
   "meta_test": {
-    "SKA": "ar", "YBAA": "ar",
-    "PNV": "vi", "THV": "vi"
+    "ASI":   "hi",
+    "THV":   "vi",
+    "TXHC":  "zh",
+    "YDCK":  "ko",
+    "NJS":   "es",
+    "YBAA":  "ar"
   },
-  "note": "meta_test locked before any training. Evaluated ONCE at the end."
+  "note": "2 train + 1 val + 1 test per accent group (hi/vi/zh/ko/es/ar). meta_test locked before training. All test speakers share an accent with training speakers — tests within-accent adaptation speed."
 }

@@ -1,0 +1,44 @@
+model:
+  name: facebook/wav2vec2-base-100h
+  mode: lora_maml
+  lora_rank: 8
+  lora_alpha: 16
+  lora_layers: [6, 7, 8, 9, 10, 11]
+  lora_targets: [q_proj, k_proj, v_proj, out_proj]
+
+maml:
+  mode: lora_maml
+  rounds: 200
+  k: 5
+  inner_lr: 5.0e-3
+  outer_lr: 5.0e-4
+  outer_optimizer: adamw
+  outer_weight_decay: 1.0e-4
+  lr_schedule: cosine
+  lr_warmup_rounds: 20
+  tasks_per_node: 3
+  support_size: 15
+  query_size: 20
+  eval_support_size: 20
+  eval_query_size: 50
+  max_audio_samples: 64000
+  lora_rank: 8
+  lora_alpha: 16.0
+  max_grad_norm: 50.0
+
+federated:
+  num_nodes: 12
+  cohort_fraction: 0.25  # 3/12 nodes per round; 3 × ~15 GB = ~45 GB peak on A100
+  num_rounds: 200
+
+data:
+  dataset: l2arctic
+  nodes_dir: data/l2arctic_nodes
+  test_nodes_dir: data/l2arctic_test_nodes
+  split_file: data/l2arctic_split.json
+
+hardware:
+  device: cuda
+
+logging:
+  experiment_name: fedlora_maml_l2arctic

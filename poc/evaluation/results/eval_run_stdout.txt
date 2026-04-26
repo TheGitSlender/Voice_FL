@@ -1,0 +1,29 @@
+load_conda:unalias:8: not enough arguments
+/home/zeus/miniconda3/etc/profile.d/conda.sh:48: defining function based on alias `conda'
+/home/zeus/miniconda3/etc/profile.d/conda.sh:48: parse error near `()'
+(eval):1: defining function based on alias `conda'
+(eval):1: parse error near `()'
+============================================================
+FedLoRA-MAML Evaluation — L2-ARCTIC Meta-Test
+============================================================
+  ASI       L1: hi  (Hindi)
+  THV       L1: vi  (Vietnamese)
+  TXHC      L1: zh  (Mandarin)
+  YDCK      L1: ko  (Korean)
+  NJS       L1: es  (Spanish)
+  YBAA      L1: ar  (Arabic)
+
+Checkpoint   : checkpoints/federated/theta_star_lora_round_0040.pt
+Test nodes   : /teamspace/studios/this_studio/vision_fl/poc/data/l2arctic_test_nodes
+Device       : cuda  |  k=5  |  inner_lr=0.005
+Eval clips   : all non-support clips per speaker  |  Support pool: 50
+
+/home/zeus/miniconda3/envs/cloudspace/lib/python3.12/site-packages/huggingface_hub/file_download.py:949: FutureWarning: `resume_download` is deprecated and will be removed in version 1.0.0. Downloads always resume when possible. If you want to force a new download, use `force_download=True`.
+  warnings.warn(
+Traceback (most recent call last):
+  File "/teamspace/studios/this_studio/vision_fl/poc/evaluation/eval_lora.py", line 523, in <module>
+    main()
+  File "/teamspace/studios/this_studio/vision_fl/poc/evaluation/eval_lora.py", line 309, in main
+    "n_eval_clips": N_EVAL,
+                    ^^^^^^
+NameError: name 'N_EVAL' is not defined

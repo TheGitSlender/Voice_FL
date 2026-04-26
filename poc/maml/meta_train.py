@@ -47,7 +47,7 @@ def parse_args():
     return p.parse_args()
 
 def load_config(path: str | None) -> dict:
-    import yaml
+    from maml import _load_yaml
     defaults = {
         "rounds": 20,
         "device": "cpu",
@@ -63,8 +63,7 @@ def load_config(path: str | None) -> dict:
     }
     if path is None:
         return defaults
-    with open(path) as f:
-        cfg = yaml.safe_load(f)
+    cfg = _load_yaml(path)
     maml_cfg = cfg.get("maml", {})
                                                                         
     if "k" in maml_cfg and "inner_steps" not in maml_cfg:

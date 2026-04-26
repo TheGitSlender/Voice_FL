@@ -1,0 +1,203 @@
+version: "3.9"
+
+# FedLoRA-MAML — L2-ARCTIC federated stack (12 nodes, 6 accent groups)
+#
+# Accent distribution of training nodes (2 speakers per accent group):
+#   Hindi (hi):      RRBI, TNI
+#   Vietnamese (vi): HQTV, PNV
+#   Mandarin (zh):   BWC, LXC
+#   Korean (ko):     YKWK, HJK
+#   Spanish (es):    ERMS, EBVS
+#   Arabic (ar):     ZHAA, SKA
+#
+# Meta-val speakers (1 per accent): SVBI, TLV, NCC, HKK, MBMPS, ABA
+# Meta-test speakers (1 per accent): ASI, THV, TXHC, YDCK, NJS, YBAA
+# Test speakers share accent groups with training speakers.
+#
+# Prerequisites:
+#   1. Prepare nodes:
+#        python data/prepare_l2arctic_lora.py --split meta_train
+#        python data/prepare_l2arctic_lora.py --split meta_val
+#   2. Build images:
+#        docker compose -f docker/docker-compose.l2arctic.yml build
+#   3. Set HF_CACHE:
+#        export HF_CACHE=~/.cache/huggingface
+#
+# Run:
+#   docker compose -f docker/docker-compose.l2arctic.yml up
+#
+# Monitor:
+#   docker compose -f docker/docker-compose.l2arctic.yml logs -f server
+
+networks:
+  voicefl-net:
+    driver: bridge
+
+x-node-env: &node-env
+  PYTHONUNBUFFERED: "1"
+  CUDA_VISIBLE_DEVICES: "${CUDA_VISIBLE_DEVICES:-0}"
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  MLFLOW_TRACKING_URI: "file:///app/mlruns"
+
+x-node-base: &node-base
+  image: voicefl-lora-node
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.node
+  networks:
+    - voicefl-net
+  depends_on:
+    server:
+      condition: service_started
+  command: >
+    python federated/run_node_lora.py
+      --config configs/l2arctic_lora_poc.yaml
+      --server_address server:8080
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+  restart: "no"
+
+services:
+  server:
+    image: voicefl-lora-server
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    networks:
+      - voicefl-net
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../checkpoints/federated:/app/checkpoints/federated
+      - ../checkpoints/centralized:/app/checkpoints/centralized:ro
+      - ../mlruns:/app/mlruns
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - MLFLOW_TRACKING_URI=file:///app/mlruns
+    command: >
+      python federated/server_lora.py
+        --config configs/l2arctic_lora_poc.yaml
+    restart: "no"
+
+  # ── Hindi nodes (L1: hi) ─────────────────────────────────────────────────
+  node_RRBI:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      SPEAKER_ID: RRBI
+    volumes:
+      - ../data/l2arctic_nodes/RRBI:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+
+  node_TNI:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      SPEAKER_ID: TNI
+    volumes:
+      - ../data/l2arctic_nodes/TNI:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+
+  # ── Vietnamese nodes (L1: vi) ────────────────────────────────────────────
+  node_HQTV:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      SPEAKER_ID: HQTV
+    volumes:
+      - ../data/l2arctic_nodes/HQTV:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+
+  node_PNV:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      SPEAKER_ID: PNV
+    volumes:
+      - ../data/l2arctic_nodes/PNV:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+
+  # ── Mandarin nodes (L1: zh) ──────────────────────────────────────────────
+  node_BWC:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      SPEAKER_ID: BWC
+    volumes:
+      - ../data/l2arctic_nodes/BWC:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+
+  node_LXC:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      SPEAKER_ID: LXC
+    volumes:
+      - ../data/l2arctic_nodes/LXC:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+
+  # ── Korean nodes (L1: ko) ────────────────────────────────────────────────
+  node_YKWK:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      SPEAKER_ID: YKWK
+    volumes:
+      - ../data/l2arctic_nodes/YKWK:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+
+  node_HJK:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      SPEAKER_ID: HJK
+    volumes:
+      - ../data/l2arctic_nodes/HJK:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+
+  # ── Spanish nodes (L1: es) ───────────────────────────────────────────────
+  node_ERMS:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      SPEAKER_ID: ERMS
+    volumes:
+      - ../data/l2arctic_nodes/ERMS:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+
+  node_EBVS:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      SPEAKER_ID: EBVS
+    volumes:
+      - ../data/l2arctic_nodes/EBVS:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+
+  # ── Arabic nodes (L1: ar) ────────────────────────────────────────────────
+  node_ZHAA:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      SPEAKER_ID: ZHAA
+    volumes:
+      - ../data/l2arctic_nodes/ZHAA:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+
+  node_SKA:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      SPEAKER_ID: SKA
+    volumes:
+      - ../data/l2arctic_nodes/SKA:/data:ro
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface

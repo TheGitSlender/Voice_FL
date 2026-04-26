@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Phase 1 (FOMAML-ANIL) only. For Phase 2 (FedLoRA-MAML), use run_fedlora.sh.
 # Build Docker images and generate resolved docker-compose with real node hashes.
 # Run from the repo root: ./scripts/build.sh
 

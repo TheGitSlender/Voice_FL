@@ -1,42 +1,4 @@
-"""
-LoRA-wrapped Wav2Vec2ForCTC for FedLoRA-MAML.
-
-FedLoRA-MAML achieves TRUE second-order MAML on CTC. Two conditions make this
-possible:
-  1. ctc/differentiable_ctc.py — CTC loss in pure PyTorch ops, supports
-     create_graph=True. Captures both LoRA curvature and CTC alignment curvature.
-  2. LoRA restricts the inner loop to ~320K parameters — feasible Hessian at k=5.
-
-This is NOT ANIL. Both encoder (via LoRA) and lm_head adapt in the inner loop.
-The frozen backbone provides universal acoustic representations. The LoRA adapters
-capture speaker-specific acoustic patterns.
-
-Why eager attention (attn_implementation="eager"):
-  F.scaled_dot_product_attention's CPU backend calls
-  aten::_scaled_dot_product_flash_attention_for_cpu, which has no registered
-  second derivative. Eager mode uses explicit bmm-based attention that autograd
-  can differentiate through twice.
-
-Why layers 6–11 only:
-  Layers 0–5 encode speaker-independent acoustic-phonetic features (formants,
-  pitch structure). Layers 6–11 encode linguistic context and speaker-specific
-  prosodic patterns. Adapting upper layers captures speaker variation without
-  disrupting universal acoustic representations.
-
-Why manual LoRA (not peft):
-  peft's LoraModel wraps modules with hooks and module traversal that is
-  incompatible with higher.innerloop_ctx. Manual LoRALinear keeps frozen weights
-  as plain frozen parameters and LoRA matrices as standard nn.Parameters — higher
-  can patch these cleanly.
-
-Parameter groups:
-  lm_head:          ~25K  trainable — local adaptation, also aggregated by FL
-  LoRA A/B:        ~295K  trainable — aggregated by FL server
-  frozen backbone: ~94.5M frozen   — never transmitted, never trained
-
-get_outer_loop_params() = get_lora_params() = all trainable = LoRA + lm_head.
-No ANIL split — both are transmitted and meta-gradient targets.
-"""
+"""LoRA-wrapped Wav2Vec2ForCTC for FedLoRA-MAML (true second-order MAML, ~320K params)."""
 
 from __future__ import annotations
 
@@ -45,7 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
-MODEL_NAME = "facebook/wav2vec2-base-960h"
+# 100h: trained lm_head prevents blank collapse; higher loss gives MAML gradient signal.
+MODEL_NAME = "facebook/wav2vec2-base-100h"
+PROCESSOR_NAME = "facebook/wav2vec2-base-960h"
 
 LORA_TARGET_LAYERS: list[int] = list(range(6, 12))
 LORA_TARGET_PROJECTIONS: list[str] = ["q_proj", "k_proj", "v_proj", "out_proj"]
@@ -98,30 +62,14 @@ class LoRALinear(nn.Module):
         return linear
 
 class LoRAWav2Vec2(nn.Module):
-    """
-    Wav2Vec2ForCTC with LoRA injected into transformer layers 6–11.
-
-    Second-order MAML is now possible because:
-      1. Inner loop trains only ~320K LoRA + lm_head params (manageable graph)
-      2. CTC loss is fully differentiable via ctc/differentiable_ctc.py
-         (both LoRA curvature AND CTC alignment curvature are captured)
-
-    This is TRUE second-order MAML — not a first-order approximation.
-
-    Usage:
-        model = LoRAWav2Vec2(device="cuda")
-        # All trainable params: LoRA A/B + lm_head
-        params = model.get_lora_params()
-        # Forward — loss computed externally via ctc_loss_differentiable
-        out = model(input_values=audio)
-        logits = out.logits
-    """
+    """Wav2Vec2ForCTC with LoRA in transformer layers 6–11. Trainable: LoRA A/B + lm_head (~320K)."""
 
     def __init__(
         self,
         device: str | torch.device = "cpu",
         r: int = LORA_R,
         alpha: float = LORA_ALPHA,
+        model_name: str = MODEL_NAME,
     ) -> None:
         super().__init__()
         self.device = torch.device(device)
@@ -129,7 +77,7 @@ class LoRAWav2Vec2(nn.Module):
         self.alpha = alpha
 
         self.model: Wav2Vec2ForCTC = Wav2Vec2ForCTC.from_pretrained(
-            MODEL_NAME, attn_implementation="eager"
+            model_name, attn_implementation="eager"
         )
 
         for param in self.model.parameters():
@@ -160,25 +108,11 @@ class LoRAWav2Vec2(nn.Module):
         return [p for p in self.model.parameters() if p.requires_grad]
 
     def get_outer_loop_params(self) -> list[nn.Parameter]:
-        """
-        Same as get_lora_params().
-
-        In FedLoRA-MAML, LoRA params AND lm_head adapt in the inner loop AND
-        are aggregated by the FL server. No ANIL split — both are meta-gradient
-        targets transmitted to the FL server.
-        """
+        """Same as get_lora_params(). No ANIL split — LoRA + lm_head are both aggregated by FL."""
         return [p for p in self.model.parameters() if p.requires_grad]
 
     def merge_lora(self) -> None:
-        """
-        Merge LoRA deltas into frozen backbone weights.
-
-        W_final = W_frozen + B @ A * scaling
-
-        Call after personalization is complete. After merging, inference has
-        zero overhead vs the base model. The LoRALinear modules are replaced
-        with plain nn.Linear modules.
-        """
+        """Merge LoRA deltas (W_final = W_frozen + B @ A * scaling) into backbone weights in-place."""
         layers = self.model.wav2vec2.encoder.layers
         for idx in LORA_TARGET_LAYERS:
             attn = layers[idx].attention
@@ -207,7 +141,7 @@ class LoRAWav2Vec2(nn.Module):
         return sum(p.numel() for p in self.model.parameters() if not p.requires_grad)
 
 def load_processor() -> Wav2Vec2Processor:
-    return Wav2Vec2Processor.from_pretrained(MODEL_NAME)
+    return Wav2Vec2Processor.from_pretrained(PROCESSOR_NAME)
 
 if __name__ == "__main__":
     import sys

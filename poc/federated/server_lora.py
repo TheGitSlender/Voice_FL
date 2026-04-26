@@ -21,11 +21,9 @@ from __future__ import annotations
 
 import argparse
 import gc
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
 
 
 def parse_args():
@@ -38,7 +36,7 @@ def parse_args():
 
 
 def load_config(path: str | None) -> dict:
-    import yaml
+    from maml import _load_yaml
 
     defaults = {
         "rounds": 200,
@@ -51,8 +49,7 @@ def load_config(path: str | None) -> dict:
     }
     if path is None:
         return defaults
-    with open(path) as f:
-        cfg = yaml.safe_load(f)
+    cfg = _load_yaml(path)
 
     maml_cfg = cfg.get("maml", {})
     if "k" in maml_cfg and "rounds" not in maml_cfg:
@@ -109,25 +106,16 @@ def main():
         flush=True,
     )
 
-    # Collect (name, param) pairs for trainable params — order matches
-    # get_outer_loop_params() since both iterate model.parameters() in
-    # PyTorch registration order.
+    # Order matches get_outer_loop_params() — both iterate model.parameters().
     trainable_named = [
         (n, p) for n, p in model.model.named_parameters() if p.requires_grad
     ]
     param_names = [n for n, _ in trainable_named]
 
-    # Find the most recent checkpoint: prefer round checkpoints over the final file
     round_ckpts = sorted(ckpt_dir.glob("theta_star_lora_round_*.pt"))
     resume_ckpt = round_ckpts[-1] if round_ckpts else (final_ckpt if final_ckpt.exists() else None)
-
-    # Extract the round number from the checkpoint name so downstream logging
-    # (MLflow step, print output, checkpoint filenames) continues from the
-    # correct global round rather than restarting at 1 after each session.
-    round_offset = 0
-    if round_ckpts:
-        # filename: theta_star_lora_round_0020.pt  →  20
-        round_offset = int(round_ckpts[-1].stem.split("_")[-1])
+    # Round offset keeps global round numbers consistent across session restarts.
+    round_offset = int(round_ckpts[-1].stem.split("_")[-1]) if round_ckpts else 0
 
     if resume_ckpt is not None:
         print(f"  Resuming from {resume_ckpt.name} (round offset={round_offset})", flush=True)
@@ -150,15 +138,17 @@ def main():
         else:
             print("  No checkpoint found — using fresh LoRA init (B=0, A~N(0,0.02))", flush=True)
 
-    # Extract initial numpy arrays (float16 for wire efficiency)
     initial_ndarrays = [
-        p.detach().half().cpu().numpy() for _, p in trainable_named
+        p.detach().float().cpu().numpy() for _, p in trainable_named
     ]
     initial_params = ndarrays_to_parameters(initial_ndarrays)
     del initial_ndarrays, trainable_named
 
     del model
     gc.collect()
+
+    from maml import _load_yaml
+    maml_cfg = _load_yaml(args.config).get("maml", {}) if args.config else {}
 
     strategy = PerFedAvgStrategy(
         initial_parameters=initial_params,
@@ -170,6 +160,9 @@ def main():
         param_names=param_names,
         experiment_name=cfg["experiment_name"],
         round_offset=round_offset,
+        weight_decay=maml_cfg.get("outer_weight_decay", 1e-4),
+        total_rounds=cfg["rounds"],
+        warmup_rounds=maml_cfg.get("lr_warmup_rounds", 20),
     )
 
     cohort_size = max(1, int(cfg["fraction_fit"] * cfg["min_available_clients"]))

@@ -12,7 +12,7 @@ version: "3.9"
 #   2. VCTK nodes prepared:
 #        python data/prepare_vctk_lora.py
 #   3. Set HF_CACHE to your HuggingFace cache dir:
-#        export HF_CACHE=/teamspace/studios/this_studio/.cache/huggingface
+#        export HF_CACHE=~/.cache/huggingface
 #
 # Run:
 #   docker compose -f docker/docker-compose.vctk.yml up

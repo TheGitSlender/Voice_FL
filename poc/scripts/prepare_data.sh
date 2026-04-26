@@ -20,12 +20,11 @@ echo ""
 # Step 1: Environment check
 echo "[STEP 1] Checking environment..."
 python -c "
-import torch, transformers, datasets, flwr, learn2learn, jiwer
+import torch, transformers, datasets, flwr, jiwer
 import importlib.metadata
 print(f'  torch:        {torch.__version__}')
 print(f'  transformers: {transformers.__version__}')
 print(f'  flwr:         {flwr.__version__}')
-print(f'  learn2learn:  {learn2learn.__version__}')
 print(f'  jiwer:        {importlib.metadata.version(\"jiwer\")}')
 print('  OK — all packages importable')
 "

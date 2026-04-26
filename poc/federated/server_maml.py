@@ -14,11 +14,9 @@ Usage (Docker):
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -29,7 +27,7 @@ def parse_args():
     return p.parse_args()
 
 def load_config(path: str | None) -> dict:
-    import yaml
+    from maml import _load_yaml
     defaults = {
         "rounds": 20,
         "outer_lr": 2e-4,
@@ -40,8 +38,7 @@ def load_config(path: str | None) -> dict:
     }
     if path is None:
         return defaults
-    with open(path) as f:
-        cfg = yaml.safe_load(f)
+    cfg = _load_yaml(path)
     defaults.update(cfg.get("federated", {}))
     defaults.update(cfg.get("maml", {}))
     return defaults

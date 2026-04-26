@@ -1,0 +1,454 @@
+{
+  "meta_test_speakers": [
+    "ASI",
+    "THV",
+    "TXHC",
+    "YDCK",
+    "NJS",
+    "YBAA"
+  ],
+  "eval_config": {
+    "k": 5,
+    "inner_lr": 0.005,
+    "n_eval_clips": "all_non_support",
+    "n_support_clips": 50,
+    "eval_seed": 0,
+    "federated_ckpt": "checkpoints/federated/theta_star_lora_round_0050.pt"
+  },
+  "communication_efficiency": {
+    "params_per_round": 319488,
+    "bytes_per_round": 1277952,
+    "vs_full_perfedavg_bytes": 377486848,
+    "reduction_factor": 295
+  },
+  "per_speaker": {
+    "ASI": {
+      "WER_960h_k0": 0.0792,
+      "WER_960h_k0_ci": [
+        0.0619,
+        0.0995
+      ],
+      "WER_960h_k5": 0.0792,
+      "WER_960h_k5_ci": [
+        0.0619,
+        0.0995
+      ],
+      "WER_base_k0": 1.0,
+      "WER_base_k0_ci": [
+        1.0,
+        1.0
+      ],
+      "WER_base_k5": 1.0,
+      "WER_base_k5_ci": [
+        1.0,
+        1.0
+      ],
+      "WER_100h_k0": 0.1721,
+      "WER_100h_k0_ci": [
+        0.1415,
+        0.2064
+      ],
+      "WER_100h_k5": 0.1731,
+      "WER_100h_k5_ci": [
+        0.1415,
+        0.2082
+      ],
+      "WER_federated_k0": 0.1679,
+      "WER_federated_k0_ci": [
+        0.1392,
+        0.1982
+      ],
+      "WER_federated_k5": 0.1668,
+      "WER_federated_k5_ci": [
+        0.1378,
+        0.1969
+      ],
+      "data_efficiency": {
+        "5_utts": 0.1689,
+        "10_utts": 0.17,
+        "20_utts": 0.1668,
+        "50_utts": 0.1668
+      },
+      "l1": "hi"
+    },
+    "THV": {
+      "WER_960h_k0": 0.319,
+      "WER_960h_k0_ci": [
+        0.2828,
+        0.3583
+      ],
+      "WER_960h_k5": 0.319,
+      "WER_960h_k5_ci": [
+        0.2828,
+        0.3583
+      ],
+      "WER_base_k0": 1.0,
+      "WER_base_k0_ci": [
+        1.0,
+        1.0
+      ],
+      "WER_base_k5": 1.0,
+      "WER_base_k5_ci": [
+        1.0,
+        1.0
+      ],
+      "WER_100h_k0": 0.4061,
+      "WER_100h_k0_ci": [
+        0.3687,
+        0.4456
+      ],
+      "WER_100h_k5": 0.4031,
+      "WER_100h_k5_ci": [
+        0.3667,
+        0.4412
+      ],
+      "WER_federated_k0": 0.3708,
+      "WER_federated_k0_ci": [
+        0.3286,
+        0.4128
+      ],
+      "WER_federated_k5": 0.3718,
+      "WER_federated_k5_ci": [
+        0.3302,
+        0.4139
+      ],
+      "data_efficiency": {
+        "5_utts": 0.3728,
+        "10_utts": 0.3738,
+        "20_utts": 0.3718,
+        "50_utts": 0.3718
+      },
+      "l1": "vi"
+    },
+    "TXHC": {
+      "WER_960h_k0": 0.1762,
+      "WER_960h_k0_ci": [
+        0.1321,
+        0.2182
+      ],
+      "WER_960h_k5": 0.1771,
+      "WER_960h_k5_ci": [
+        0.1328,
+        0.2185
+      ],
+      "WER_base_k0": 1.0,
+      "WER_base_k0_ci": [
+        1.0,
+        1.0
+      ],
+      "WER_base_k5": 1.0,
+      "WER_base_k5_ci": [
+        1.0,
+        1.0
+      ],
+      "WER_100h_k0": 0.2694,
+      "WER_100h_k0_ci": [
+        0.2248,
+        0.3063
+      ],
+      "WER_100h_k5": 0.2721,
+      "WER_100h_k5_ci": [
+        0.2286,
+        0.3081
+      ],
+      "WER_federated_k0": 0.2648,
+      "WER_federated_k0_ci": [
+        0.2069,
+        0.3175
+      ],
+      "WER_federated_k5": 0.2638,
+      "WER_federated_k5_ci": [
+        0.2058,
+        0.3156
+      ],
+      "data_efficiency": {
+        "5_utts": 0.2694,
+        "10_utts": 0.2629,
+        "20_utts": 0.2638,
+        "50_utts": 0.2638
+      },
+      "l1": "zh"
+    },
+    "YDCK": {
+      "WER_960h_k0": 0.2196,
+      "WER_960h_k0_ci": [
+        0.1089,
+        0.3137
+      ],
+      "WER_960h_k5": 0.2174,
+      "WER_960h_k5_ci": [
+        0.1074,
+        0.3098
+      ],
+      "WER_base_k0": 1.0,
+      "WER_base_k0_ci": [
+        1.0,
+        1.0
+      ],
+      "WER_base_k5": 1.0,
+      "WER_base_k5_ci": [
+        1.0,
+        1.0
+      ],
+      "WER_100h_k0": 0.3472,
+      "WER_100h_k0_ci": [
+        0.1785,
+        0.4905
+      ],
+      "WER_100h_k5": 0.3509,
+      "WER_100h_k5_ci": [
+        0.1816,
+        0.4944
+      ],
+      "WER_federated_k0": 0.3774,
+      "WER_federated_k0_ci": [
+        0.1724,
+        0.5545
+      ],
+      "WER_federated_k5": 0.3849,
+      "WER_federated_k5_ci": [
+        0.1803,
+        0.5617
+      ],
+      "data_efficiency": {
+        "5_utts": 0.3758,
+        "10_utts": 0.3834,
+        "20_utts": 0.3826,
+        "50_utts": 0.3849
+      },
+      "l1": "ko"
+    },
+    "NJS": {
+      "WER_960h_k0": 0.1008,
+      "WER_960h_k0_ci": [
+        0.0759,
+        0.1232
+      ],
+      "WER_960h_k5": 0.1008,
+      "WER_960h_k5_ci": [
+        0.0759,
+        0.1232
+      ],
+      "WER_base_k0": 1.6263,
+      "WER_base_k0_ci": [
+        1.5331,
+        1.7143
+      ],
+      "WER_base_k5": 1.0,
+      "WER_base_k5_ci": [
+        1.0,
+        1.0
+      ],
+      "WER_100h_k0": 0.198,
+      "WER_100h_k0_ci": [
+        0.1566,
+        0.2346
+      ],
+      "WER_100h_k5": 0.1989,
+      "WER_100h_k5_ci": [
+        0.1579,
+        0.2349
+      ],
+      "WER_federated_k0": 0.2146,
+      "WER_federated_k0_ci": [
+        0.1649,
+        0.2641
+      ],
+      "WER_federated_k5": 0.2183,
+      "WER_federated_k5_ci": [
+        0.1656,
+        0.2704
+      ],
+      "data_efficiency": {
+        "5_utts": 0.2165,
+        "10_utts": 0.2165,
+        "20_utts": 0.2183,
+        "50_utts": 0.2183
+      },
+      "l1": "es"
+    },
+    "YBAA": {
+      "WER_960h_k0": 0.1129,
+      "WER_960h_k0_ci": [
+        0.0906,
+        0.1367
+      ],
+      "WER_960h_k5": 0.1148,
+      "WER_960h_k5_ci": [
+        0.0931,
+        0.1383
+      ],
+      "WER_base_k0": 1.2163,
+      "WER_base_k0_ci": [
+        1.03,
+        1.4848
+      ],
+      "WER_base_k5": 1.0,
+      "WER_base_k5_ci": [
+        1.0,
+        1.0
+      ],
+      "WER_100h_k0": 0.1895,
+      "WER_100h_k0_ci": [
+        0.161,
+        0.218
+      ],
+      "WER_100h_k5": 0.1904,
+      "WER_100h_k5_ci": [
+        0.162,
+        0.2187
+      ],
+      "WER_federated_k0": 0.244,
+      "WER_federated_k0_ci": [
+        0.2017,
+        0.2811
+      ],
+      "WER_federated_k5": 0.2411,
+      "WER_federated_k5_ci": [
+        0.2,
+        0.2777
+      ],
+      "data_efficiency": {
+        "5_utts": 0.2411,
+        "10_utts": 0.2402,
+        "20_utts": 0.2402,
+        "50_utts": 0.2411
+      },
+      "l1": "ar"
+    }
+  },
+  "per_accent": {
+    "hi": {
+      "speakers": [
+        "ASI"
+      ],
+      "l1_name": "Hindi",
+      "WER_100h_k0_vals": [
+        0.1721
+      ],
+      "WER_100h_k0": 0.1721,
+      "WER_100h_k5_vals": [
+        0.1731
+      ],
+      "WER_100h_k5": 0.1731,
+      "WER_federated_k0_vals": [
+        0.1679
+      ],
+      "WER_federated_k0": 0.1679,
+      "WER_federated_k5_vals": [
+        0.1668
+      ],
+      "WER_federated_k5": 0.1668
+    },
+    "vi": {
+      "speakers": [
+        "THV"
+      ],
+      "l1_name": "Vietnamese",
+      "WER_100h_k0_vals": [
+        0.4061
+      ],
+      "WER_100h_k0": 0.4061,
+      "WER_100h_k5_vals": [
+        0.4031
+      ],
+      "WER_100h_k5": 0.4031,
+      "WER_federated_k0_vals": [
+        0.3708
+      ],
+      "WER_federated_k0": 0.3708,
+      "WER_federated_k5_vals": [
+        0.3718
+      ],
+      "WER_federated_k5": 0.3718
+    },
+    "zh": {
+      "speakers": [
+        "TXHC"
+      ],
+      "l1_name": "Mandarin",
+      "WER_100h_k0_vals": [
+        0.2694
+      ],
+      "WER_100h_k0": 0.2694,
+      "WER_100h_k5_vals": [
+        0.2721
+      ],
+      "WER_100h_k5": 0.2721,
+      "WER_federated_k0_vals": [
+        0.2648
+      ],
+      "WER_federated_k0": 0.2648,
+      "WER_federated_k5_vals": [
+        0.2638
+      ],
+      "WER_federated_k5": 0.2638
+    },
+    "ko": {
+      "speakers": [
+        "YDCK"
+      ],
+      "l1_name": "Korean",
+      "WER_100h_k0_vals": [
+        0.3472
+      ],
+      "WER_100h_k0": 0.3472,
+      "WER_100h_k5_vals": [
+        0.3509
+      ],
+      "WER_100h_k5": 0.3509,
+      "WER_federated_k0_vals": [
+        0.3774
+      ],
+      "WER_federated_k0": 0.3774,
+      "WER_federated_k5_vals": [
+        0.3849
+      ],
+      "WER_federated_k5": 0.3849
+    },
+    "es": {
+      "speakers": [
+        "NJS"
+      ],
+      "l1_name": "Spanish",
+      "WER_100h_k0_vals": [
+        0.198
+      ],
+      "WER_100h_k0": 0.198,
+      "WER_100h_k5_vals": [
+        0.1989
+      ],
+      "WER_100h_k5": 0.1989,
+      "WER_federated_k0_vals": [
+        0.2146
+      ],
+      "WER_federated_k0": 0.2146,
+      "WER_federated_k5_vals": [
+        0.2183
+      ],
+      "WER_federated_k5": 0.2183
+    },
+    "ar": {
+      "speakers": [
+        "YBAA"
+      ],
+      "l1_name": "Arabic",
+      "WER_100h_k0_vals": [
+        0.1895
+      ],
+      "WER_100h_k0": 0.1895,
+      "WER_100h_k5_vals": [
+        0.1904
+      ],
+      "WER_100h_k5": 0.1904,
+      "WER_federated_k0_vals": [
+        0.244
+      ],
+      "WER_federated_k0": 0.244,
+      "WER_federated_k5_vals": [
+        0.2411
+      ],
+      "WER_federated_k5": 0.2411
+    }
+  }
+}

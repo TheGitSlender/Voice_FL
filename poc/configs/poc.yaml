@@ -12,6 +12,7 @@ maml:
   support_size: 8
   query_size: 8
   mode: fomaml
+  max_grad_norm: 10.0
 
 federated:
   rounds: 20
