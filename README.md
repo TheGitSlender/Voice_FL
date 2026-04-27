@@ -34,6 +34,8 @@ No differential privacy. No SecAgg. Plain gRPC.
 
 ## 1. Hardware Requirements
 
+### Phase 1 — FOMAML-ANIL (LibriSpeech, 5 nodes)
+
 | Component | Minimum | Tested on |
 |-----------|---------|-----------|
 | GPU | 8 GB VRAM (CUDA) | RTX 4070 Super, 12 GB VRAM |
@@ -42,9 +44,24 @@ No differential privacy. No SecAgg. Plain gRPC.
 | CUDA | 11.8+ | 12.4 |
 | CPU-only | Supported (slow) | Set `device: cpu` in `configs/poc.yaml` |
 
-The centralized gate (Step 7) loads one model in float32 (~378 MB) and runs 20 outer iterations.  
-Each Docker node runs in BF16 (~189 MB). With 5 nodes sharing one GPU, peak VRAM is ~1.1 GB.  
+The centralized gate loads one model in float32 (~378 MB) and runs 20 outer iterations.
+Each Docker node runs in BF16 (~189 MB). With 5 nodes sharing one GPU, peak VRAM is ~1.1 GB.
 The server container runs on CPU only and holds `θ*` as float16 numpy (~189 MB).
+
+### Phase 2 — FedLoRA-MAML (L2-ARCTIC, 12 nodes)
+
+| Component | Minimum | Tested on |
+|-----------|---------|-----------|
+| GPU | 16 GB VRAM (CUDA) | A100 80 GB |
+| RAM | 32 GB | 80 GB |
+| Disk | 40 GB free | — |
+| CUDA | 11.8+ | 12.4 |
+| CPU-only | Not recommended | second-order CTC is ~300× slower than GPU |
+
+Each node loads `wav2vec2-base-100h` (~378 MB float32) plus LoRA adapters (~1.3 MB).
+With `cohort_fraction: 0.25` (3 active nodes per round), peak VRAM is ~3 × 3.5 GB = ~10.5 GB
+on a single GPU. The A100 ran all 12 nodes concurrently (~60 GB peak) without OOM.
+The server holds only the 320K LoRA + lm\_head parameters (~1.3 MB).
 
 ---
 
