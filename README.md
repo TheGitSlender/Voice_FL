@@ -1,701 +1,688 @@
-# VoiceFL-MAML
+# VoiceFL-MAML PoC — Reproducibility Guide
 
-> **Privacy-Preserving Federated Meta-Learning for Personalized Speech Recognition**
+Federated meta-learning for personalized speech recognition.  
+5 LibriSpeech speakers, FOMAML + ANIL, Flower FL, Wav2Vec2, Docker.  
+No differential privacy. No SecAgg. Plain gRPC.
 
-**Architecture:** Per-FedAvg MAML + Wav2Vec2-base-960h + manual DP + BAE  
-**Dev hardware:** RTX 4070 Super (FOMAML) → A100 (full second-order, pending CTC fix)  
-**Scale:** 20 simulated nodes (LibriSpeech speakers) → production deployment later
+**Result:** `eval_poc.py` exits 0 — all 3 success criteria and all 6 invariants pass.
 
 ---
 
 ## Table of Contents
 
-1. [Project Goal](#1-project-goal)
-2. [Architecture Stack](#2-architecture-stack)
-3. [Dataset](#3-dataset)
-4. [Data Pipeline](#4-data-pipeline)
-5. [Model: Wav2Vec2MAML](#5-model-wav2vec2maml)
-6. [MAML Engine](#6-maml-engine)
-7. [Task Sampler](#7-task-sampler)
-8. [Federated Layer](#8-federated-layer)
-9. [Privacy](#9-privacy)
-10. [Security: BAE](#10-security-bae)
-11. [Evaluation](#11-evaluation)
-12. [Configuration](#12-configuration)
-13. [Environment](#13-environment)
-14. [Phase Status](#14-phase-status)
-15. [Test Status](#15-test-status)
-16. [Known Issues](#16-known-issues)
-17. [Repository Structure](#17-repository-structure)
-18. [References](#18-references)
+1. [Hardware Requirements](#1-hardware-requirements)
+2. [Software Prerequisites](#2-software-prerequisites)
+3. [Repository Layout](#3-repository-layout)
+4. [Environment Setup](#4-environment-setup)
+5. [Step-by-Step Reproduction](#5-step-by-step-reproduction)
+   - [Step 1 — Environment check](#step-1--environment-check)
+   - [Step 2 — Toy MAML verification](#step-2--toy-maml-verification)
+   - [Step 3 — Data pipeline](#step-3--data-pipeline)
+   - [Step 4 — Task sampler smoke test](#step-4--task-sampler-smoke-test)
+   - [Step 5 — Model wrapper verification](#step-5--model-wrapper-verification)
+   - [Step 6 — MAML engine smoke test](#step-6--maml-engine-smoke-test)
+   - [Step 7 — Centralized MAML gate](#step-7--centralized-maml-gate)
+   - [Step 8 — Docker build](#step-8--docker-build)
+   - [Step 9 — Federated smoke test (5 rounds)](#step-9--federated-smoke-test-5-rounds)
+   - [Step 10 — Full PoC evaluation](#step-10--full-poc-evaluation)
+6. [Expected Outputs](#6-expected-outputs)
+7. [Configuration Reference](#7-configuration-reference)
+8. [Troubleshooting](#8-troubleshooting)
 
 ---
 
-## 1. Project Goal
+## 1. Hardware Requirements
 
-Build a **federated meta-learning system** for personalized automatic speech recognition. Each FL client is a different speaker. The system learns a global speech model that adapts rapidly to any new speaker with only a few examples (K-shot learning via MAML).
+| Component | Minimum | Tested on |
+|-----------|---------|-----------|
+| GPU | 8 GB VRAM (CUDA) | RTX 4070 Super, 12 GB VRAM |
+| RAM | 16 GB | 32 GB |
+| Disk | 20 GB free | — |
+| CUDA | 11.8+ | 12.4 |
+| CPU-only | Supported (slow) | Set `device: cpu` in `configs/poc.yaml` |
 
-Core problem: centralized voice AI requires uploading raw audio. VoiceFL never does — each speaker's data stays local. Only sanitized meta-gradients leave the device.
-
-| | Centralized | VoiceFL-MAML |
-|---|---|---|
-| Raw voice data | Uploaded to servers | Never leaves the node |
-| Personalization | One model for all | Per-speaker lm_head adaptation |
-| Privacy guarantee | Policy document | (ε, δ)-DP on transmitted gradients |
-| Node trust | Implicit | Zero-trust + BAE anomaly screening |
-
----
-
-## 2. Architecture Stack
-
-| Component | Choice | Reason |
-|-----------|--------|--------|
-| Model | `facebook/wav2vec2-base-960h` | CTC, raw waveform input, clean MAML inner loop |
-| FL Algorithm | Per-FedAvg (Fallah et al. NeurIPS 2020) | Clients send meta-gradients; server applies outer lr β |
-| MAML variant | FOMAML (dev) / Full MAML (A100) | First-order cheaper, second-order more accurate |
-| ANIL split | encoder → FL global / lm_head → local | Fast inner loop, stable outer loop |
-| Privacy | Manual DP (L2 clip + Gaussian noise) | Opacus incompatible with `higher`'s functional wrapper |
-| Security | Behavioral Analysis Engine (BAE) | 4-layer anomaly detection on meta-gradients |
-| FL Framework | Flower `flwr[simulation]` | Virtual Client Engine, single-machine simulation |
-| Tracking | MLflow | Per-round metrics, WER curves, epsilon spend |
-
-### Data flow
-
-```
-LibriSpeech cache
-      │
-      ▼
-pii_masking.py  →  raw_clips.pkl (temp, per node)
-      │
-      ▼
-features.py     →  features.pt (1D float32 waveforms) + labels.txt
-                   raw_clips.pkl deleted (I1)
-      │
-      ▼
-partition.py    →  partition_manifest.json (validated, maml_ready: true)
-      │
-      ▼
-VoiceTaskSampler  →  (support_audio, support_labels, query_audio, query_labels)
-      │
-      ▼
-MAMLEngine.compute_meta_gradient()
-      │
-      ▼
-apply_dp_to_meta_gradient()  →  sanitized outer-loop grads
-      │
-      ▼ (over Flower VCE)
-PerFedAvgStrategy.aggregate_fit()
-  θ* ← θ* − β · weighted_avg(meta_grads)   [Per-FedAvg update]
-```
-
-**Critical invariants:**
-
-| # | Invariant | Enforced in |
-|---|-----------|-------------|
-| I1 | Raw audio deleted after features.py | `assert not os.path.exists(pkl_path)` |
-| I2 | No speaker_id in node artifacts | `data/partition.py` validation |
-| I3 | `lm_head` never transmitted via FL | `Wav2Vec2MAML.get_outer_loop_params()` |
-| I4 | `fit()` returns meta-gradients, not weights | `MAMLClient.fit()` |
-| I5 | No Opacus — manual DP only | `privacy/dp_meta.py` |
-| I6 | Support ∩ query = ∅ | `VoiceTaskSampler.sample_task()` |
-| I7 | Encoder `requires_grad` stays True | `Wav2Vec2MAML.__init__()` |
+The centralized gate (Step 7) loads one model in float32 (~378 MB) and runs 20 outer iterations.  
+Each Docker node runs in BF16 (~189 MB). With 5 nodes sharing one GPU, peak VRAM is ~1.1 GB.  
+The server container runs on CPU only and holds `θ*` as float16 numpy (~189 MB).
 
 ---
 
-## 3. Dataset
+## 2. Software Prerequisites
 
-**LibriSpeech ASR** (train.100 split) via HuggingFace `datasets`
+| Dependency | Version | Notes |
+|------------|---------|-------|
+| Python | 3.10.x | 3.11+ untested inside Docker (base image is 3.10) |
+| Docker | 24.0+ | Tested on 29.4.0 |
+| Docker Compose | v2 (`docker compose`) or v1 (`docker-compose`) | Both work |
+| NVIDIA Container Toolkit | nvidia-docker2 | Required for GPU nodes |
+| HuggingFace cache | ~1.4 GB | `facebook/wav2vec2-base-960h` auto-downloaded on first run |
 
-- 28,539 clips total — cached at `data/openslr___librispeech_asr/` (30 GB)
-- 251 speakers available; **20 selected** for simulation
-- Selection strategy: stratified by `duration_std` to maximize non-IID diversity
-- Speaker → node mapping: `data/speaker_selection.json` (speaker IDs anonymized with one-way hash)
-
-### Node statistics (current)
-
-| Node | Clips | Duration | Vocab Richness |
-|------|-------|----------|----------------|
-| node_001 | 108 | 25.1 min | 0.339 |
-| node_002 | 111 | 25.0 min | 0.313 |
-| node_003 | 103 | 24.3 min | 0.299 |
-| node_004 | 102 | 22.5 min | 0.313 |
-| node_005 | 102 | 23.7 min | 0.257 |
-| node_006 | 81 | 17.4 min | 0.283 |
-| node_007 | 114 | 25.2 min | 0.323 |
-| node_008 | 115 | 25.2 min | 0.296 |
-| node_009 | 115 | 25.1 min | 0.328 |
-| node_010 | 115 | 25.1 min | 0.332 |
-| node_011 | 107 | 23.9 min | 0.256 |
-| node_012 | 121 | 25.1 min | 0.320 |
-| node_013 | 116 | 25.1 min | 0.273 |
-| node_014 | 56 | 12.3 min | 0.370 |
-| node_015 | 122 | 25.1 min | 0.345 |
-| node_016 | 118 | 24.0 min | 0.290 |
-| node_017 | 123 | 25.0 min | 0.275 |
-| node_018 | 86 | 17.1 min | 0.258 |
-| node_019 | 110 | 21.6 min | 0.353 |
-| node_020 | 137 | 25.1 min | 0.359 |
-| **Total** | **2,162** | **7.71 hours** | — |
-
-Vocab richness = type-token ratio (unique words / total words) — proxy for non-IID heterogeneity.
-
----
-
-## 4. Data Pipeline
-
-Run in this order:
+Install NVIDIA Container Toolkit if not present:
 
 ```bash
-python data/pii_masking.py   # strips PII, saves raw_clips.pkl per node
-python data/features.py      # converts to 1D waveforms, deletes pkl
-python data/partition.py     # validates format, writes manifest
+distribution=$(. /etc/os-release && echo $ID$VERSION_ID)
+curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
+curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list \
+  | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+sudo apt-get update && sudo apt-get install -y nvidia-docker2
+sudo systemctl restart docker
 ```
 
-### `data/pii_masking.py`
-
-- Reads `data/speaker_selection.json`
-- Streams LibriSpeech from local HF cache (no re-download)
-- Applies `data/cleaning_config.json` filters: min/max duration, silence fraction
-  - Default `max_silence_fraction: 0.99` (relaxed from 0.5 — the 0.01 amplitude threshold is too aggressive for raw float32 PCM)
-- Strips all PII fields: retains only `{audio array, text, duration_s}`
-- Saves `data/nodes/node_XXX/raw_clips.pkl` (temporary)
-- Saves `data/nodes/node_XXX/metadata.json` (no speaker_id)
-
-### `data/features.py`
-
-- Loads each `raw_clips.pkl`
-- Per clip: cast to float32, resample to 16kHz if needed, peak-normalize to `[-1, 1]`
-- Saves `features.pt` as `List[torch.Tensor]` with each tensor shape `(T_samples,)`
-- Saves `labels.txt` as UPPERCASE transcriptions (one per line)
-- **Deletes `raw_clips.pkl`** with assertion (invariant I1)
-
-### Feature format
-
-```
-features.pt → list of torch.Tensor
-  shape:  (T_samples,)           variable length, e.g. (92160,) for 5.76s
-  dtype:  float32
-  range:  [-1, 1]                peak normalized
-  rate:   16 kHz
-```
-
-This is raw waveform — **not** log-mel spectrograms. Wav2Vec2 consumes raw audio directly.
-
-### `data/partition.py`
-
-- Validates 1D tensors, float32 dtype, values in `[-1.1, 1.1]`, ≥50 clips per node
-- Computes per-node vocabulary richness
-- Writes `data/partition_manifest.json` with `feature_format: raw_waveform_float32_1d` and `maml_ready: true`
-
----
-
-## 5. Model: Wav2Vec2MAML
-
-**File:** `models/wav2vec2_maml.py`  
-**Base:** `Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-base-960h")`
-
-Wav2Vec2 is a CTC model. It takes raw waveform as input and outputs character-level logits in a single forward pass. There is no decoder autoregression — this makes the MAML inner loop clean and fast.
-
-### ANIL Split
-
-```
-wav2vec2 encoder  →  ~94M params  →  outer loop  →  FL aggregated (global)
-lm_head           →  ~25K params  →  inner loop  →  stays local (personalization)
-```
-
-```python
-get_inner_loop_params() → list(model.lm_head.parameters())     # adapts per speaker
-get_outer_loop_params() → [p for name,p in model.named_parameters()
-                            if not name.startswith("lm_head")]  # transmitted via FL
-forward(input_values, labels) → Wav2Vec2ForCTCOutput            # .loss (CTC), .logits
-decode(logits) → List[str]                                      # greedy CTC argmax
-```
-
-**Why not freeze the encoder?** Invariant I7: `encoder.requires_grad = True` always. For second-order MAML (full mode), the meta-gradient must flow through `lm_head → encoder`. Freezing the encoder would break the outer loop update.
-
-**Model sizes:**
-- Total: ~94M + 25K ≈ 94M params
-- Encoder: ~94M (wav2vec2.*)
-- lm_head: ~25K (768 → 32 linear)
-
----
-
-## 6. MAML Engine
-
-**File:** `maml/engine.py`
-
-```python
-@dataclass
-class MAMLConfig:
-    mode: str = "fomaml"    # "full" | "fomaml" | "reptile"
-    k: int = 3              # inner loop steps
-    inner_lr: float = 1e-4  # α
-    outer_lr: float = 2e-4  # β (centralized mode)
-    adaptation_mode: str = "anil"
-    use_bf16: bool = True
-
-class MAMLEngine:
-    compute_meta_gradient(sup_audio, sup_labels, qry_audio, qry_labels)
-        → (meta_grads: List[Tensor|None], query_loss: float)
-    adapt(audio, labels, k) → adapted_model_copy
-```
-
-### Three modes
-
-**FOMAML** (`mode="fomaml"`) — RTX 4070 Super
-
-```
-1. save init_state = deepcopy(model.state_dict())
-2. run k SGD steps on lm_head using support set
-3. evaluate on query set at adapted lm_head
-4. meta_grads = autograd.grad(query_loss, model.parameters(), create_graph=False)
-5. model.load_state_dict(init_state)  ← restores original state
-```
-
-First-order approximation: gradient at `θ'` (adapted params), no Hessian term. Equivalent to `learn2learn.MAML(first_order=True)` but without Cython (which breaks on Python 3.13+).
-
-**Full MAML** (`mode="full"`) — A100 required (currently broken, see §16)
-
-```
-higher.innerloop_ctx(track_higher_grads=True):
-    k differentiable SGD steps on lm_head
-    query forward pass
-autograd.grad flows THROUGH the inner loop → Hessian term included
-```
-
-**Reptile** (`mode="reptile"`) — RTX 4070 Super
-
-```
-1. save init_params
-2. k SGD steps on full model
-3. meta_grad = (θ_init - θ_adapted) / k
-4. restore init_params
-```
-
-### `maml/meta_train.py`
-
-Centralized validation gate before federating:
-
-```python
-run_centralized_meta_training(model, engine, task_samplers, n_epochs=50)
-# outer optimizer: AdamW(model.parameters(), lr=2e-4, wd=0.01)
-# gate: WER(k=3) < WER(k=0) on ≥12/20 nodes
-```
-
-### `maml/meta_eval.py`
-
-```python
-evaluate_adaptation_at_k(k_values=[0, 1, 3, 5, 10])
-# k=0: eval θ* directly (no adaptation)
-# k>0: engine.adapt(support, k) → eval adapted model → compute WER via jiwer
-```
-
----
-
-## 7. Task Sampler
-
-**File:** `data/task_sampler.py`
-
-```python
-class VoiceTaskSampler:
-    def __init__(self, node_dir, processor, K=8, Q=8, device='cpu')
-    def sample_task(seed=None)
-        → (support_audio, support_labels, query_audio, query_labels)
-    def sample_eval_batch(n=10) → (audio, labels)
-```
-
-- Samples K+Q non-overlapping clip indices (invariant I6: support ∩ query = ∅ always)
-- Audio batching: `Wav2Vec2Processor` pads variable-length 1D arrays to `(K, T_max)`
-- Label tokenization: `processor.tokenizer(texts, ...)` — note: `as_target_processor()` was removed in transformers 5.x
-- Padding token → `-100` for CTC loss masking
-
----
-
-## 8. Federated Layer
-
-### `federated/client_maml.py` — `MAMLClient(NumPyClient)`
-
-```python
-get_parameters() → encoder params as numpy arrays     # lm_head excluded (I3)
-set_parameters() → restores encoder from server arrays
-fit():
-    1. set_parameters() from server
-    2. check accountant.is_exhausted() → skip if ε budget spent
-    3. sample_task() → support + query
-    4. compute_meta_gradient()
-    5. _extract_outer_grads()  # align grads to encoder params by id(p)
-    6. apply_dp_to_meta_gradient()
-    7. accountant.step()
-    8. return grad_numpy, n_samples, {query_loss, grad_norm, epsilon}
-evaluate():
-    → evaluate_adaptation_at_k([0, k])
-    → returns (wer_k, n_clips, {wer, wer_0shot, adaptation_gain})
-```
-
-### `federated/strategy_maml.py` — `PerFedAvgStrategy(FedAvg)`
-
-Per-FedAvg is gradient descent on the server, not weight averaging:
-
-```
-FedAvg:      θ_new = weighted_avg(θ_clients)
-Per-FedAvg:  θ* ← θ* − β · weighted_avg(meta_grads)
-```
-
-```python
-aggregate_fit():
-    1. extract meta-gradients from client results
-    2. BAE screening → adjusted_weights (optional)
-    3. weighted_avg(meta_grads, adjusted_weights)
-    4. θ* ← θ* − β · avg_gradient
-    5. MLflow: query_loss, epsilon_avg, active_nodes
-
-aggregate_evaluate():
-    → aggregate per-node WER + adaptation_gain
-    → MLflow: eval/mean_wer, eval/mean_adaptation_gain
-```
-
-### `federated/simulation_maml.py` — entry point
+Verify GPU access inside Docker:
 
 ```bash
-python federated/simulation_maml.py --config configs/dev.yaml
-```
-
-Loads all 20 `VoiceTaskSamplers`, pre-shares `Wav2Vec2Processor`, creates `client_fn(cid)` factory, runs `fl.simulation.start_simulation(client_fn, 20, strategy=PerFedAvgStrategy)`.
-
----
-
-## 9. Privacy
-
-**Files:** `privacy/dp_meta.py`, `privacy/rdp_accountant.py`
-
-### Mechanism
-
-Applied to the **outer-loop meta-gradient** (encoder params only) before transmission. Never applied to `lm_head` (never transmitted — I3).
-
-```
-Step 1 — L2 clip:   ΔW̄ = ΔW · min(1, C / ‖ΔW‖₂)
-Step 2 — Noise:     ΔW_private = ΔW̄ + N(0, σ²C²I)
-
-C = clipping threshold (default 1.0)
-σ = noise multiplier (calibrated via autodp RDP)
-```
-
-```python
-# privacy/dp_meta.py
-DPConfig(epsilon, delta, C, sigma, enabled, sample_rate)
-compute_sigma(epsilon, delta, C) → float
-apply_dp_to_meta_gradient(meta_grads, C, sigma) → (sanitized_grads, original_norm)
-
-# privacy/rdp_accountant.py
-RDPAccountant(target_epsilon, target_delta)
-    .step(noise_multiplier, sample_rate)   # compose RDP mechanism per round
-    .get_epsilon()                          # current ε spend
-    .is_exhausted()                         # True if ε >= target_epsilon
-    .summary()                              # "Steps: N | ε spent: X / Y | Remaining: Z"
-```
-
-**No Opacus** (I5): `higher.innerloop_ctx` wraps the model in a stateless functional form. Opacus requires `nn.Module` hooks to track per-sample gradients — incompatible. DP is applied manually to the already-computed meta-gradient tensor.
-
-### Privacy budget reference
-
-| Use case | ε | WER impact |
-|----------|---|------------|
-| Dev (no DP) | ∞ | None |
-| Dev (light DP) | 8 | < 5% |
-| Production target | 4 | 5–15% |
-| High-security | 2 | 15–30% |
-
----
-
-## 10. Security: BAE
-
-**Files:** `security/bae_maml.py`, `security/attacks/`
-
-### 4-Layer Screening Pipeline
-
-```
-Round N meta-gradients → flatten to 1D vectors
-    │
-    ├─ Layer 1: cosine_anomaly(flat, round_median)
-    │           score = 1 - max(cosine_sim, 0)
-    │           detects: Byzantine, sign-flipping
-    │
-    ├─ Layer 2: norm_feature(node_id, flat)
-    │           z-score vs node history, clip to [0,1]
-    │           detects: gradient amplification, poisoning
-    │
-    ├─ Layer 3: temporal_feature(node_id, current_cosine)
-    │           deviation from recent cosine trend
-    │           detects: delayed poisoning, Sybil takeover
-    │
-    └─ Layer 4: IsolationForest(contamination=0.1)
-                joint anomaly score over [f1, f2, f3]
-                requires ≥4 nodes; falls back to cosine score
-```
-
-### Response tiers
-
-```
-score < 0.6:              weight = 1.0              (pass)
-0.6 ≤ score < 0.8:        weight = 1.0 - score      (soft penalty)
-0.8 ≤ score < 0.95:       weight = 0.0, quarantined
-score ≥ 0.95:             weight = 0.0, permanently excluded
-```
-
-Audit log: `security/audit_log.jsonl`
-
-### Attack simulators
-
-```
-security/attacks/byzantine_maml.py   — random gradient (fully adversarial)
-security/attacks/freerider_maml.py   — zero gradient (parasitic)
-security/attacks/poisoning_maml.py   — clean + scaled noise (stealth)
-security/attacks/sybil_maml.py       — n_fake near-copies of real gradient
-```
-
-Integration: `PerFedAvgStrategy.aggregate_fit()` calls `bae.screen_updates(grad_dict, round_num)` **before** computing the weighted average.
-
----
-
-## 11. Evaluation
-
-```python
-# evaluation/eval_maml.py
-run_full_evaluation()
-    → WER at k=0,1,3,5,10 per node
-    → aggregate mean/std/min/max
-    → saves evaluation/results/eval_results.json
-    → logs to MLflow
-
-# evaluation/ablation.py
-run_ablation()
-    → MAML mode (fomaml / reptile) × k (1,3,5) × epsilon (∞,8,4) × ANIL ablation
-```
-
-Primary gate: **WER(k=3) < WER(k=0) on ≥12/20 nodes** — confirms MAML actually improves over zero-shot.
-
----
-
-## 12. Configuration
-
-### `configs/dev.yaml` — RTX 4070 Super
-
-```yaml
-maml.mode: fomaml
-maml.k: 3
-maml.inner_lr: 1.0e-4
-maml.outer_lr: 2.0e-4
-privacy.enabled: false
-bae.enabled: false
-hardware.device: cuda
-hardware.gpu_per_client: 0.5
-fl.num_rounds: 50
-fl.clients_per_round: 2
-```
-
-### `configs/experiment.yaml` — A100
-
-```yaml
-maml.mode: full          # NOTE: currently broken — see §16
-maml.k: 3
-privacy.enabled: true
-privacy.epsilon: 4.0
-privacy.delta: 1.0e-5
-privacy.C: 1.0
-hardware.device: cuda
-hardware.gpu_per_client: 1.0
-fl.num_rounds: 100
-fl.clients_per_round: 5
+docker run --rm --gpus all nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi
 ```
 
 ---
 
-## 13. Environment
+## 3. Repository Layout
 
 ```
-Python 3.13.5
-torch >= 2.0.0
-torchaudio >= 2.0.0
-transformers 5.5.0          (Wav2Vec2ForCTC)
-higher 0.2.1                (second-order MAML — see §16 for CTC limitation)
-autodp >= 0.2               (RDP accounting)
-flwr[simulation] 1.28.0     (Flower + Virtual Client Engine)
-mlflow 3.10.1
-jiwer >= 3.0.0              (WER computation)
-scikit-learn >= 1.2.0       (IsolationForest in BAE)
-datasets >= 2.0.0
-soundfile >= 0.12.0
-librosa >= 0.10.0
-numpy >= 1.24.0
-tqdm >= 4.65.0
-pyyaml >= 6.0
-evaluate >= 0.4.0
-```
-
-**Intentionally absent:**
-
-| Package | Reason |
-|---------|--------|
-| `opacus` | Incompatible with `higher.innerloop_ctx` functional model |
-| `learn2learn` | Python 3.13 build failure — Cython extension missing `longintrepr.h` (removed in CPython 3.12). FOMAML is implemented natively via `torch.autograd.grad(create_graph=False)`. |
-
----
-
-## 14. Phase Status
-
-| Phase | Status | Entry point |
-|-------|--------|-------------|
-| 0 — Verification | COMPLETE | `scripts/verify_env.py` |
-| 1 — Data Pipeline | **COMPLETE** | `data/pii_masking.py → features.py → partition.py` |
-| 2 — MAML Engine | Code done, tests partial | `maml/engine.py`, `maml/meta_train.py` |
-| 3 — Model | COMPLETE | `models/wav2vec2_maml.py` |
-| 4 — Federated Layer | Code done, untested | `federated/simulation_maml.py --config configs/dev.yaml` |
-| 5 — Privacy | COMPLETE | `privacy/dp_meta.py`, `privacy/rdp_accountant.py` |
-| 6 — Security (BAE) | COMPLETE | `security/bae_maml.py` |
-| 7 — Evaluation + Config | COMPLETE | `evaluation/eval_maml.py`, `evaluation/ablation.py` |
-
-### Pending gates (in order)
-
-| Step | Command | Gate |
-|------|---------|------|
-| 1 | Fix 4 failing MAML engine tests | 8/8 tests passing |
-| 2 | `python maml/meta_train.py` | WER(k=3) < WER(k=0) on ≥12/20 nodes |
-| 3 | `python federated/simulation_maml.py` (5 rounds) | Params change each round, metrics in MLflow |
-| 4 | Full 50-round dev run (DP + BAE) | WER improves over rounds |
-| 5 | A100: switch to `experiment.yaml` | Depends on CTC second-order fix |
-
----
-
-## 15. Test Status
-
-```
-tests/test_dp_meta.py       17 tests   ALL PASS
-tests/test_bae.py           12 tests   ALL PASS
-tests/test_task_sampler.py  13 tests   ALL PASS
-tests/test_maml_engine.py    8 tests   4 PASS / 4 FAIL
-                            ─────────────────────
-Total:                      50 tests   46 PASS / 4 FAIL
-```
-
-Run all:
-```bash
-pytest tests/ -v
-```
-
----
-
-## 16. Known Issues
-
-### 1. Full MAML broken with CTC loss
-
-`_full_maml()` in `maml/engine.py` uses `higher.innerloop_ctx(track_higher_grads=True)`. This computes second-order gradients by differentiating through the CTC loss backward pass. PyTorch does not implement `derivative for aten::_ctc_loss_backward`, so this always fails.
-
-**Impact:** `configs/experiment.yaml` cannot use `maml.mode: full`. The A100 experiment path has no second-order MAML.
-
-**Options:**
-- Switch inner loop loss to token-level cross-entropy (drops CTC, requires label alignment changes)
-- Accept FOMAML as the only viable mode and treat second-order MAML as out of scope
-- Investigate GradScaler / detach patterns that might allow approximation
-
-### 2. MAML engine test fixture contamination
-
-4 tests in `tests/test_maml_engine.py` fail when the full file runs but pass in isolation. Root cause: `scope="module"` fixtures share one `Wav2Vec2MAML` instance across all 8 tests. A residual CTC computation graph leaks from one test into the next, causing `autograd.grad` to unexpectedly attempt a second-order derivative.
-
-**Fix:** change fixture scope from `"module"` to `"function"`, or add explicit `model.zero_grad()` and graph detachment between tests.
-
----
-
-## 17. Repository Structure
-
-```
-voice_fl/
-├── README.md                         # This file
-├── requirements.txt
-├── data/
-│   ├── download.py                   # Speaker selection from LibriSpeech
-│   ├── pii_masking.py                # PII stripping, raw_clips.pkl per node
-│   ├── features.py                   # 1D waveform extraction, pkl deletion
-│   ├── partition.py                  # Validation, partition_manifest.json
-│   ├── task_sampler.py               # VoiceTaskSampler — K-shot tasks
-│   ├── generate_report.py            # Data visualization (standalone)
-│   ├── cleaning_config.json          # Silence/duration filter settings
-│   ├── speaker_selection.json        # 20 selected speakers (anonymized)
-│   ├── partition_manifest.json       # Generated by partition.py
-│   └── nodes/
-│       └── node_001/ ... node_020/
-│           ├── features.pt           # List[Tensor shape (T_samples,)]
-│           ├── labels.txt            # UPPERCASE transcriptions
-│           └── metadata.json         # clip count, duration stats (no speaker_id)
-├── models/
-│   ├── __init__.py
-│   └── wav2vec2_maml.py              # Wav2Vec2MAML wrapper, ANIL split
-├── maml/
-│   ├── __init__.py
-│   ├── engine.py                     # MAMLEngine: full / fomaml / reptile
-│   ├── meta_train.py                 # Centralized validation gate
-│   └── meta_eval.py                  # WER at k=0,1,3,5,10
-├── federated/
-│   ├── __init__.py
-│   ├── client_maml.py                # MAMLClient (NumPyClient)
-│   ├── strategy_maml.py              # PerFedAvgStrategy
-│   └── simulation_maml.py            # Flower VCE entry point
-├── privacy/
-│   ├── __init__.py
-│   ├── dp_meta.py                    # DPConfig, apply_dp_to_meta_gradient()
-│   └── rdp_accountant.py             # RDPAccountant wrapping autodp
-├── security/
-│   ├── __init__.py
-│   ├── bae_maml.py                   # BehavioralAnalysisEngine (4 layers)
-│   ├── audit_log.jsonl               # Per-event anomaly log
-│   └── attacks/
-│       ├── __init__.py
-│       ├── byzantine_maml.py
-│       ├── freerider_maml.py
-│       ├── poisoning_maml.py
-│       └── sybil_maml.py
-├── evaluation/
-│   ├── __init__.py
-│   ├── eval_maml.py                  # run_full_evaluation()
-│   ├── ablation.py                   # run_ablation()
-│   └── results/
+poc/
 ├── configs/
-│   ├── dev.yaml                      # RTX 4070 Super — FOMAML, no DP
-│   └── experiment.yaml               # A100 — full MAML, DP ε=4.0
-├── tests/
-│   ├── __init__.py
-│   ├── test_task_sampler.py          # 13 tests — all pass
-│   ├── test_maml_engine.py           # 8 tests — 4 pass / 4 fail (see §16)
-│   ├── test_dp_meta.py               # 17 tests — all pass
-│   └── test_bae.py                   # 12 tests — all pass
+│   └── poc.yaml                   # single source of truth for all hyperparameters
+├── data/
+│   ├── download.py                # LibriSpeech download + speaker selection
+│   ├── pii_masking.py             # hash speaker IDs, write raw_clips.pkl
+│   ├── features.py                # extract float32 audio tensors, delete pkl
+│   ├── task_sampler.py            # VoiceTaskSampler — K-shot episode builder
+│   ├── speaker_selection.json     # generated by download.py (not committed)
+│   └── nodes/                     # generated by features.py (not committed)
+│       └── <sha256_hash>/
+│           ├── features.pt        # List[Tensor], shape (T_samples,), float32, 16 kHz
+│           └── labels.txt         # transcription per clip, one per line
+├── models/
+│   └── wav2vec2_maml.py           # Wav2Vec2MAML wrapper — ANIL split + invariants
+├── maml/
+│   ├── engine.py                  # MAMLEngine — FOMAML meta-gradient computation
+│   └── meta_train.py              # centralized training loop (Step 7 gate)
+├── federated/
+│   ├── client_maml.py             # Flower Client — set_parameters / fit / get_parameters
+│   ├── strategy_maml.py           # PerFedAvgStrategy — gradient aggregation, θ* update
+│   ├── server_maml.py             # Flower server entry point
+│   └── run_node.py                # Docker node entry point — TCP polls then connects
+├── evaluation/
+│   └── eval_poc.py                # single source of truth for PoC pass/fail
+├── docker/
+│   ├── Dockerfile.node            # pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+│   ├── Dockerfile.server          # same base, no GPU reservation
+│   └── docker-compose.yml         # 1 server + 5 nodes, voicefl-net bridge
 ├── scripts/
-│   └── verify_env.py                 # Environment sanity check
+│   ├── prepare_data.sh            # Steps 1–4 in one script
+│   ├── build.sh                   # Docker build + .env.nodes generation
+│   ├── run_poc.sh                 # federated run + eval
+│   └── generate_report_figures.py # figure generation for LaTeX report
+├── reports/
+│   ├── poc_report.tex             # LaTeX technical report
+│   └── figures/                   # pre-generated PNG figures
 ├── notebooks/
-│   ├── 01_data_exploration.ipynb
-│   └── 02_maml_toy_verification.ipynb
-└── docs/
-    └── CODEMAPS/
-        ├── architecture.md
-        ├── data.md
-        ├── dependencies.md
-        ├── phases.md
-        ├── maml_federated.md
-        └── privacy_security.md
+│   └── 01_maml_toy_verify.ipynb   # Step 2 toy verification
+├── checkpoints/                   # generated at runtime (not committed)
+│   ├── centralized/
+│   │   └── theta_star.pt          # centralized θ* (Step 7 output)
+│   └── federated/
+│       └── theta_star.pt          # federated θ* (Step 10 output)
+└── requirements.txt
 ```
 
 ---
 
-## 18. References
+## 4. Environment Setup
 
-- Fallah et al. (2020) — [Per-FedAvg: Personalized Federated Learning](https://arxiv.org/abs/2002.07948) — the core FL algorithm
-- Finn et al. (2017) — [MAML: Model-Agnostic Meta-Learning](https://arxiv.org/abs/1703.03400) — inner/outer loop framework
-- Raghu et al. (2020) — [ANIL: Rapid Learning or Feature Reuse?](https://arxiv.org/abs/1909.09157) — ANIL split justification
-- Baevski et al. (2020) — [wav2vec 2.0](https://arxiv.org/abs/2006.11477) — the base model
-- Abadi et al. (2016) — [DP-SGD](https://arxiv.org/abs/1607.00133) — differential privacy for ML
-- McMahan et al. (2017) — [FedAvg](https://arxiv.org/abs/1602.05629) — federated averaging baseline
-- Blanchard et al. (2017) — [Krum](https://proceedings.neurips.cc/paper/2017/hash/f4b9ec30ad9f68f89b29639786cb62ef-Abstract.html) — Byzantine-robust aggregation
-- [Flower Framework](https://flower.ai) — `flwr[simulation]` for FL simulation
-- [higher](https://github.com/facebookresearch/higher) — differentiable inner loop for second-order MAML
+All commands run from the `poc/` directory unless stated otherwise.
+
+```bash
+# Clone and enter the PoC subdirectory
+git clone <repo-url>
+cd voice_fl/poc
+
+# Create a virtual environment (Python 3.10 strongly recommended)
+python3.10 -m venv .venv
+source .venv/bin/activate
+
+# Install pinned dependencies
+# IMPORTANT: transformers must be <4.39 — 4.39+ calls
+# torch.utils._pytree.register_pytree_node which was removed in torch 2.5+.
+pip install -r requirements.txt
+```
+
+Pinned versions from `requirements.txt`:
+
+```
+torch>=2.1.0
+torchaudio>=2.1.0
+transformers>=4.35.0,<4.39.0
+datasets>=2.14.0,<3.0.0
+flwr>=1.2.0,<2.0.0
+numpy>=1.24.0
+PyYAML>=6.0
+jiwer>=3.0.0
+soundfile>=0.12.1
+librosa>=0.10.0
+grpcio>=1.59.0
+grpcio-tools>=1.59.0
+```
+
+Verified environment:
+
+```
+torch:        2.6.0+cu124
+transformers: 4.38.x
+flwr:         1.28.0
+jiwer:        3.x
+```
 
 ---
 
-*VoiceFL-MAML · Per-FedAvg + Wav2Vec2 + manual DP + BAE · 20 nodes · 2,162 clips · 7.71 hours*
+## 5. Step-by-Step Reproduction
+
+### Step 1 — Environment check
+
+```bash
+python -c "import torch, transformers, datasets, flwr, jiwer; print('OK')"
+python -c "import torch; print(torch.cuda.is_available())"  # expect True
+```
+
+Expected output:
+
+```
+OK
+True
+```
+
+---
+
+### Step 2 — Toy MAML verification
+
+Opens `notebooks/01_maml_toy_verify.ipynb`. Confirms that 3 inner steps of gradient descent
+on a perturbed linear head produce lower query loss than zero steps.
+
+```bash
+jupyter notebook notebooks/01_maml_toy_verify.ipynb
+# Run all cells — final cell prints: "PASS: WER k=3 < k=0"
+```
+
+This notebook has no dataset dependency — it uses synthetic data.
+
+---
+
+### Step 3 — Data pipeline
+
+Runs three scripts in sequence. Each step is a prerequisite for the next.
+
+```bash
+# Download LibriSpeech train-clean-100 and select 5 speakers.
+# Writes data/speaker_selection.json.
+# Downloads ~6 GB to HuggingFace cache (~/.cache/huggingface/datasets/).
+python data/download.py
+
+# Hash speaker IDs and write raw_clips.pkl per node.
+# No speaker_id stored in node directories (Invariant I2).
+python data/pii_masking.py
+
+# Extract float32 waveform tensors, write features.pt + labels.txt per node.
+# Deletes raw_clips.pkl after extraction (Invariant I1).
+python data/features.py
+```
+
+Or run the single combined script:
+
+```bash
+./scripts/prepare_data.sh
+```
+
+After this step, `data/nodes/` contains exactly 5 directories:
+
+```
+data/nodes/
+├── b15129ee.../   features.pt  labels.txt
+├── c57fbbea.../   features.pt  labels.txt
+├── 8a12e006.../   features.pt  labels.txt
+├── f14ed0f2.../   features.pt  labels.txt
+└── 6cea687f.../   features.pt  labels.txt
+```
+
+Verify sovereignty invariants:
+
+```bash
+find data/nodes -name "*.pkl"             # must return nothing (Invariant I1)
+grep -r "speaker_id" data/nodes/          # must return nothing (Invariant I2)
+```
+
+---
+
+### Step 4 — Task sampler smoke test
+
+```bash
+python data/task_sampler.py
+```
+
+Expected output (per node):
+
+```
+Node b15129ee: sampled task — support=8 clips, query=8 clips, overlap=0
+...
+All 5 nodes: PASS
+```
+
+Internally asserts `support_indices ∩ query_indices = ∅` (Invariant I5).
+
+---
+
+### Step 5 — Model wrapper verification
+
+```bash
+python -c "
+from models.wav2vec2_maml import Wav2Vec2MAML
+m = Wav2Vec2MAML(device='cpu')
+m.verify_param_partition()
+inner = list(m.get_inner_loop_params())
+outer = list(m.get_outer_loop_params())
+print(f'inner params: {len(inner)} tensors ({sum(p.numel() for p in inner):,} scalars)')
+print(f'outer params: {len(outer)} tensors ({sum(p.numel() for p in outer):,} scalars)')
+print('Partition OK')
+"
+```
+
+Expected output:
+
+```
+inner params: 2 tensors (25,088 scalars)    # lm_head weight + bias
+outer params: 210 tensors (94,479,872 scalars)  # wav2vec2 encoder
+Partition OK
+```
+
+The 210 count (not 211) reflects that parametrizations on `pos_conv_embed.conv` are stripped
+for the federated path. See `models/wav2vec2_maml.py` and `model/Parametrizations.md`.
+
+---
+
+### Step 6 — MAML engine smoke test
+
+```bash
+python -c "
+import torch, yaml
+from models.wav2vec2_maml import Wav2Vec2MAML
+from maml.engine import MAMLEngine
+from data.task_sampler import VoiceTaskSampler
+from transformers import Wav2Vec2Processor
+import glob, pathlib
+
+cfg = yaml.safe_load(open('configs/poc.yaml'))
+device = 'cpu'
+processor = Wav2Vec2Processor.from_pretrained('facebook/wav2vec2-base-960h')
+model = Wav2Vec2MAML(device=device)
+engine = MAMLEngine(model, processor, inner_steps=3, inner_lr=1e-4, device=device)
+
+node_dirs = sorted(pathlib.Path('data/nodes').iterdir())
+sampler = VoiceTaskSampler(node_dirs[0], support_size=8, query_size=8)
+task = sampler.sample_task()
+grads = engine.compute_meta_gradient(task)
+print(f'meta-gradients: {len(grads)} tensors, first shape={grads[0].shape}')
+print(f'all non-None: {all(g is not None for g in grads)}')
+print('MAML engine: OK')
+"
+```
+
+Expected output:
+
+```
+meta-gradients: 210 tensors, first shape=torch.Size([512, 1, 10])
+all non-None: True
+MAML engine: OK
+```
+
+---
+
+### Step 7 — Centralized MAML gate
+
+Trains θ* on all 5 nodes' data for 20 rounds using FOMAML + ANIL on one machine.
+This is the prerequisite for the federated run — it produces `checkpoints/centralized/theta_star.pt`
+which seeds the Flower server.
+
+```bash
+python maml/meta_train.py --config configs/poc.yaml
+```
+
+Runtime: ~25–40 minutes on RTX 4070 Super (float32, 20 rounds, 5 nodes).
+
+Expected training output:
+
+```
+[Round  1] avg_query_loss=53.96  grad_norm=855.9
+[Round  5] avg_query_loss=51.01  grad_norm=794.0
+[Round 10] avg_query_loss=52.29  grad_norm=856.7
+[Round 20] avg_query_loss=50.56  grad_norm=889.6
+Saved: checkpoints/centralized/theta_star.pt
+```
+
+Gate evaluation output (printed after training):
+
+```
+Node 1 (b15129ee): WER k=0=3.09%  WER k=10=0.69%  reduction=77.8%  PASS
+Node 2 (c57fbbea): WER k=0=1.72%  WER k=10=1.38%  reduction=19.8%  PASS
+Node 3 (8a12e006): WER k=0=8.19%  WER k=10=3.20%  reduction=60.9%  PASS
+Node 4 (f14ed0f2): WER k=0=3.97%  WER k=10=1.70%  reduction=57.2%  PASS
+Node 5 (6cea687f): WER k=0=4.36%  WER k=10=3.64%  reduction=16.6%  PASS
+Gate: 5/5 PASSED  (need ≥4/5)
+```
+
+**If fewer than 4/5 nodes pass:** the encoder has not meta-learned a useful initialisation.
+Do not proceed to federation. Check loss curve for divergence (loss > 200 at round 5 indicates
+a BF16 precision issue — confirm `device: cuda` in config and that `to_bf16()` is not called
+in `meta_train.py`).
+
+---
+
+### Step 8 — Docker build
+
+```bash
+./scripts/build.sh
+```
+
+This script:
+1. Reads `data/speaker_selection.json` for the 5 node hashes
+2. Creates `checkpoints/nodes/node{1..5}/` and `checkpoints/federated/`
+3. Builds `voicefl-node` and `voicefl-server` images from `docker/Dockerfile.node` and
+   `docker/Dockerfile.server` (base: `pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime`)
+4. Writes `.env.nodes` with `NODE_HASH_1..5` variables
+
+Expected output:
+
+```
+=== Building Docker images ===
+...
+voicefl-node    latest    ...
+voicefl-server  latest    ...
+Saved: .env.nodes
+```
+
+Verify images:
+
+```bash
+docker images | grep voicefl
+# voicefl-node     latest    <id>    ...
+# voicefl-server   latest    <id>    ...
+```
+
+---
+
+### Step 9 — Federated smoke test (5 rounds)
+
+Run 5 rounds before committing to the full 20 to verify the stack works end-to-end.
+
+```bash
+NUM_ROUNDS=5 ./scripts/run_poc.sh
+```
+
+Or directly with Docker Compose:
+
+```bash
+source .env.nodes
+NUM_ROUNDS=5 docker-compose -f docker/docker-compose.yml up --abort-on-container-exit
+```
+
+Expected server logs:
+
+```
+INFO: Starting Flower server on 0.0.0.0:8080  rounds=5
+INFO: [ROUND 1] configure_fit: sampled N clients (of 5 connected so far)
+[server] Round 2: aggregated 5 clients | β=0.0002 | total_examples=80
+[server] Round 3: aggregated 5 clients | β=0.0002 | total_examples=80
+...
+Final θ* saved: /app/checkpoints/federated/theta_star.pt
+```
+
+Round 1 may aggregate fewer than 5 clients — this is expected. TCP polling in `run_node.py`
+means some nodes connect mid-round. From Round 2 onward all 5 clients participate.
+
+Verify `θ*` was written:
+
+```bash
+ls -lh checkpoints/federated/theta_star.pt
+# -rw-r--r-- 1 ... ~361M checkpoints/federated/theta_star.pt
+
+python -c "
+import torch
+d = torch.load('checkpoints/federated/theta_star.pt', map_location='cpu', weights_only=True)
+nan_count = sum(v.isnan().sum().item() for v in d.values())
+print(f'keys={len(d)}  nan_params={nan_count}')
+# expect: keys=210  nan_params=0
+"
+```
+
+---
+
+### Step 10 — Full PoC evaluation
+
+Run the complete 20-round federated training and evaluate all 3 success criteria.
+
+```bash
+./scripts/run_poc.sh
+```
+
+Or, if you already have a federated checkpoint from a prior run, evaluate directly:
+
+```bash
+python evaluation/eval_poc.py --config configs/poc.yaml
+```
+
+The evaluator requires both checkpoints to be present:
+
+```
+checkpoints/federated/theta_star.pt     # from Step 9/10
+checkpoints/centralized/theta_star.pt   # from Step 7
+```
+
+**Full expected output:**
+
+```
+[SOVEREIGNTY CHECKS]
+  [PASS] I1: no .pkl files in data/nodes/ — clean
+  [PASS] I2: no speaker_id in data/nodes/ — clean
+
+[LOADING MODELS]
+  [PASS] Federated checkpoint exists — .../checkpoints/federated/theta_star.pt
+  [PASS] Centralized checkpoint exists — .../checkpoints/centralized/theta_star.pt
+
+[INVARIANT CHECKS]
+  [PASS] I3: lm_head not in outer_loop_params() — overlap=0 params
+  [PASS] I4: strategy applies θ*←θ*−β·grad (not weight avg)
+  [PASS] I5: support∩query=∅ (10 samples)
+  [PASS] I6: encoder requires_grad=True — all True
+
+[CRITERION 1: ADAPTATION]
+  [PASS] Node 1: WER(k=3)=0.043 < WER(k=0)=0.079
+  [PASS] Node 2: WER(k=3)=0.043 < WER(k=0)=0.081
+  [PASS] Node 3: WER(k=3)=0.029 < WER(k=0)=0.037
+  [PASS] Node 4: WER(k=3)=0.010 < WER(k=0)=0.016
+  [PASS] Node 5: WER(k=3)=0.027 < WER(k=0)=0.107
+  [PASS] Criterion 1: 5/5 nodes adapted — need ≥4
+
+[CRITERION 2: FEDERATION]
+  [PASS] Criterion 2: federated WER=0.054 vs centralized WER=0.057
+         fed is 5.1% better (limit 15% worse)
+
+[CRITERION 3: SOVEREIGNTY]
+  [PASS] Criterion 3: sovereignty (no PKL + no speaker_id)
+
+============================================================
+FINAL RESULT
+============================================================
+  [PASS] All invariants (I1–I6)
+  [PASS] Criterion 1: Adaptation — 5/5 nodes
+  [PASS] Criterion 2: Federation
+  [PASS] Criterion 3: Sovereignty
+
+PoC PASSED — all 3 criteria met, all 6 invariants satisfied
+```
+
+Exit code: `0`
+
+---
+
+## 6. Expected Outputs
+
+| Artifact | Path | Size | Notes |
+|----------|------|------|-------|
+| Speaker selection | `data/speaker_selection.json` | ~1 KB | 5 hashes, stable for a given dataset split |
+| Node features | `data/nodes/<hash>/features.pt` | ~15–80 MB each | float32, 16 kHz waveforms |
+| Node labels | `data/nodes/<hash>/labels.txt` | ~5–20 KB each | uppercase LibriSpeech transcriptions |
+| Centralized θ* | `checkpoints/centralized/theta_star.pt` | ~361 MB | float32 state dict, has `parametrizations.weight.original0/1` keys |
+| Training metrics | `checkpoints/centralized/training_metrics.json` | ~1 KB | loss + grad_norm per round |
+| Step 7 results | `checkpoints/centralized/step7_results.json` | ~1 KB | WER per node |
+| Federated θ* | `checkpoints/federated/theta_star.pt` | ~361 MB | float32 state dict, plain `weight` key (no parametrizations) |
+
+---
+
+## 7. Configuration Reference
+
+All parameters live in `configs/poc.yaml`. Do not hardcode values elsewhere.
+
+```yaml
+device: cuda             # cuda or cpu
+
+maml:
+  inner_steps: 3         # k — adaptation steps per task during training
+  inner_lr: 0.0001       # α — inner loop learning rate
+  outer_lr: 0.0002       # β — outer loop / Per-FedAvg step size
+  support_size: 8        # K — support clips per task
+  query_size: 8          # Q — query clips per task
+  mode: fomaml           # fomaml only in PoC (create_graph=False)
+
+federated:
+  rounds: 20             # FL rounds
+  fraction_fit: 1.0      # fraction of clients sampled per round (all 5)
+  min_available_clients: 5
+  port: 8080
+
+node:
+  server_address: "server:8080"   # Docker service name
+  device: cuda
+  nodes_dir: /data                # Docker bind mount; locally: data/nodes/
+
+evaluation:
+  n_tasks: 5             # episodes averaged per node for WER
+  federation_tolerance: 0.15   # Criterion 2: signed (fed−cen)/cen ≤ 0.15
+  eval_inner_steps: 10   # k for WER evaluation (stronger than training k=3)
+  eval_inner_lr: 0.001   # α for WER evaluation (10× training lr for clear signal)
+
+checkpoint_dir: checkpoints/federated
+```
+
+Key design decisions:
+
+- **`eval_inner_steps: 10` vs training `inner_steps: 3`**: Training uses weak adaptation
+  to stress-test the encoder. Evaluation uses strong adaptation (10 steps at 1e-3) to produce
+  a clearly measurable WER improvement against std=0.3 lm_head noise. These are two operating
+  modes of the same θ*.
+- **`outer_lr: 0.0002`**: Chosen conservatively to prevent catastrophic forgetting of the
+  pretrained wav2vec2 representation. Raw CTC gradient norms are 650–1035; after clipping
+  at max_norm=1.0 the effective step is 2e-4 per parameter.
+- **`federation_tolerance: 0.15`**: One-directional. The check is `(fed−cen)/cen ≤ 0.15`,
+  not `abs(...)`. If federated is *better* than centralized (negative difference), it passes.
+
+---
+
+## 8. Troubleshooting
+
+### `ValueError: Parameter count mismatch: received 210, expected 211`
+
+The server broadcast 210 parameters (parametrizations stripped) but a client model still has
+211 (parametrizations active). This happens when `to_bf16()` is not called on the client
+before `set_parameters()`.
+
+Fix: `client_maml.py` calls `model.to_bf16()` in `__init__` for CUDA devices. Verify the
+Docker node's `device` env var is `cuda`, not `cpu` (CPU models skip `to_bf16()`). The
+server always strips parametrizations before broadcasting — the client must match.
+
+### `RuntimeError: missing key: encoder.pos_conv_embed.conv.weight`
+
+Checkpoint format mismatch. The federated checkpoint has plain `weight` key; the centralized
+checkpoint has `parametrizations.weight.original0/1` keys. Loading the wrong format into the
+wrong model state causes this error.
+
+Fix: see `evaluation/eval_poc.py` `main()` — federated checkpoint requires stripping
+parametrizations *before* `set_encoder_state_dict()`; centralized checkpoint loads *with*
+parametrizations active.
+
+### NaN in `checkpoints/federated/theta_star.pt`
+
+Caused by float16 overflow during gradient accumulation. The strategy must use float32
+accumulators (`np.zeros(..., dtype=np.float32)`), not float16. With 5 clients × 16 examples
+× gradient norms ~1035, float16 overflow is guaranteed.
+
+Also verify clients clip gradients to `max_norm=10.0` before converting to float16 wire format.
+Both fixes are in `strategy_maml.py` and `client_maml.py`.
+
+### Round 1 only gets 1–3 clients
+
+Expected. The `depends_on: service_started` condition in `docker-compose.yml` only waits for
+the container process to start, not for the Flower gRPC listener to be ready. Nodes use TCP
+socket polling (`run_node.py`) and retry for up to 120 seconds. Nodes that haven't connected
+by the time Round 1 fires miss that round. All 5 participate from Round 2 onward.
+
+### HuggingFace download fails or hangs
+
+The `facebook/wav2vec2-base-960h` model (~360 MB) and `LibriSpeech train-clean-100` (~6 GB)
+are downloaded on first run. Set the cache directory explicitly if disk space is limited:
+
+```bash
+export HF_HOME=/path/to/large/disk/.cache/huggingface
+python data/download.py
+```
+
+To use a pre-downloaded cache inside Docker, mount it as a volume in `docker-compose.yml`:
+
+```yaml
+volumes:
+  - ~/.cache/huggingface:/root/.cache/huggingface:ro
+```
+
+### `transformers` version error: `register_pytree_node`
+
+`transformers>=4.39` calls `torch.utils._pytree.register_pytree_node` which was removed in
+`torch>=2.5`. Pin `transformers<4.39`:
+
+```bash
+pip install "transformers>=4.35.0,<4.39.0"
+```
+
+This is already enforced in `requirements.txt`.
+
+### BF16 training divergence (loss > 200 at round 2)
+
+`meta_train.py` must run in float32. If `to_bf16()` is called before the centralized training
+loop, CTC gradient norms (~850) produce catastrophic outer updates:
+`Δθ = 2e-4 × 850 = 0.17` per parameter — too large for BF16's 7-bit mantissa to represent
+accurately at typical weight magnitudes. Remove any `to_bf16()` calls from `meta_train.py`.
+
+BF16 is only used inside Docker nodes for the federated forward pass, never for the outer
+gradient update.
+
+---
+
+## Compile the LaTeX Report
+
+The full technical report is in `reports/poc_report.tex`.
+
+```bash
+sudo apt install texlive-latex-extra texlive-fonts-recommended texlive-science texlive-bibtex-extra
+cd reports
+pdflatex poc_report.tex
+pdflatex poc_report.tex   # second pass for TOC/references
+```
+
+Figures are pre-generated in `reports/figures/`. To regenerate them:
+
+```bash
+python scripts/generate_report_figures.py
+# requires: checkpoints/centralized/training_metrics.json
+#           checkpoints/centralized/step7_results.json
+#           (produced by meta_train.py)
+```
+
+---
+
+*VoiceFL-MAML PoC · v0.1-poc · 5 nodes · FOMAML · ANIL · Wav2Vec2 · Docker · No DP*

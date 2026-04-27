@@ -1,282 +1,594 @@
-"""
-maml/engine.py — MAML engine for Wav2Vec2 personalization
+"""MAML engine — FOMAML, second-order CTC, and LoRA-MAML modes."""
 
-Implements three MAML variants for Wav2Vec2 CTC:
-  "full"   — Second-order MAML via `higher` (A100 recommended)
-  "fomaml" — First-order MAML (RTX 4070 Super, native PyTorch)
-  "reptile" — Reptile (meta-grad = θ_init - θ_adapted)
-
-Public interface for all three modes:
-  compute_meta_gradient(support_audio, support_labels, query_audio, query_labels)
-  → (meta_grads, query_loss_value)
-
-meta_grads is a list aligned with model.model.parameters().
-After DP sanitization in the client, outer-loop gradients are transmitted to the server.
-
-Note on learn2learn: cannot be installed on Python 3.13+ (missing longintrepr.h
-in CPython internals). FOMAML is implemented natively using PyTorch autograd
-with create_graph=False, which is mathematically equivalent to learn2learn's
-MAML(first_order=True). The external API in this file is identical to what
-the build spec requires.
-
-ANIL inner loop note (I7): the inner optimizer receives only lm_head parameters.
-The encoder (wav2vec2) is NOT in the inner optimizer but remains in the
-computation graph. For second-order MAML, higher.innerloop_ctx with
-track_higher_grads=True allows gradients to flow through the inner steps
-back into the encoder. For FOMAML, we differentiate at the adapted weights
-without flowing through the adaptation steps (first-order approximation).
-"""
+from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING
 
-import higher
 import torch
+import torch.nn as nn
 
-from models.wav2vec2_maml import Wav2Vec2MAML
+if TYPE_CHECKING:
+    from data.task_sampler import Task
+    from models.wav2vec2_maml import Wav2Vec2MAML
 
+_SAMPLE_RATE = 16_000
 
 @dataclass
 class MAMLConfig:
-    mode: str = "fomaml"          # "full" | "fomaml" | "reptile"
-    k: int = 3                    # inner loop steps
-    inner_lr: float = 1e-4        # α — inner loop learning rate
-    outer_lr: float = 2e-4        # β — outer loop (used in centralized mode)
+    """Configuration for MAMLEngine."""
+
+    mode: str = "fomaml"
+    k: int = 3
+    inner_lr: float = 1e-4
+    outer_lr: float = 2e-4
     support_size: int = 8
     query_size: int = 8
-    adaptation_mode: str = "anil"
-    use_bf16: bool = True
-    gradient_checkpointing: bool = True
+                        
+    lora_rank: int = 8
+    lora_alpha: float = 16.0
 
+def _encode_audio(
+    audio_tensor: torch.Tensor,
+    processor,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Convert a 1D float32 waveform tensor to model input_values."""
+    arr = audio_tensor.float().numpy()
+    inputs = processor(
+        arr,
+        sampling_rate=_SAMPLE_RATE,
+        return_tensors="pt",
+        padding=False,
+    )
+    return inputs.input_values.to(device=device, dtype=dtype)
+
+def _encode_labels(text: str, processor, device: torch.device) -> torch.Tensor:
+    """Tokenize a transcription to label ids."""
+                                                                                  
+    ids = processor.tokenizer(text, return_tensors="pt").input_ids
+    return ids.to(device)
+
+def _accumulate_grads_over_clips(
+    model: nn.Module,
+    audio_clips: list[torch.Tensor],
+    texts: list[str],
+    params: list[torch.nn.Parameter],
+    processor,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[list[torch.Tensor], float]:
+    """Compute mean gradient of CTC loss w.r.t. params, one clip at a time.
+
+    Returns: (grad_list, mean_loss_scalar)
+    """
+    acc_grads = [torch.zeros_like(p) for p in params]
+    total_loss = 0.0
+    n_clips = len(audio_clips)
+
+    for audio, text in zip(audio_clips, texts):
+        input_values = _encode_audio(audio, processor, device, dtype)
+        labels = _encode_labels(text, processor, device)
+        out = model(input_values=input_values, labels=labels)
+
+        clip_grads = torch.autograd.grad(
+            out.loss,
+            params,
+            create_graph=False,
+            allow_unused=True,
+        )
+
+        total_loss += out.loss.item()
+
+        for acc, g in zip(acc_grads, clip_grads):
+            if g is not None:
+                acc.add_(g)
+
+        del out, clip_grads, input_values, labels
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    for acc in acc_grads:
+        acc.div_(n_clips)
+
+    return acc_grads, total_loss / n_clips
+
+_VALID_MODES = ("fomaml", "second_order_ctc", "lora_maml")
 
 class MAMLEngine:
     """
-    Wav2Vec2 MAML engine. Unified interface across full/fomaml/reptile modes.
+    MAML engine for one episode (FOMAML, second_order_ctc, or lora_maml mode).
 
-    All three variants expose the same compute_meta_gradient() interface.
-    Switch mode via MAMLConfig — no other code needs to change.
-
-    The meta-gradient returned is ∂L_query/∂θ* — the outer-loop update signal.
-    It has the same length and shapes as list(model.model.parameters()).
-    After DP sanitization, the outer-loop portion is transmitted to the server.
+    Args:
+        model:       Wav2Vec2MAML or LoRAWav2Vec2 instance
+        processor:   Wav2Vec2Processor
+        inner_steps: k inner-loop adaptation steps
+        inner_lr:    inner-loop learning rate α
+        device:      torch device
+        mode:        one of "fomaml", "second_order_ctc", "lora_maml"
     """
 
-    def __init__(self, model: Wav2Vec2MAML, config: MAMLConfig) -> None:
+    def __init__(
+        self,
+        model,
+        processor,
+        inner_steps: int = 3,
+        inner_lr: float = 1e-4,
+        device: str | torch.device = "cpu",
+        mode: str = "fomaml",
+        max_audio_samples: int | None = None,
+    ):
+        if mode not in _VALID_MODES:
+            raise ValueError(f"Unknown mode: {mode!r}. Use one of {_VALID_MODES}.")
         self.model = model
-        self.config = config
+        self.processor = processor
+        self.inner_steps = inner_steps
+        self.inner_lr = inner_lr
+        self.device = torch.device(device)
+        self.mode = mode
+                                                                                 
+        self.max_audio_samples = max_audio_samples
 
     def compute_meta_gradient(
         self,
-        support_audio: torch.Tensor,
-        support_labels: torch.Tensor,
-        query_audio: torch.Tensor,
-        query_labels: torch.Tensor,
-    ) -> Tuple[List[Optional[torch.Tensor]], float]:
+        task: "Task",
+        return_query_loss: bool = False,
+        return_inner_losses: bool = False,
+    ):
         """
-        Single task MAML step.
+        Run one MAML-ANIL episode.
 
-        Returns:
-          meta_grads: list aligned with model.model.parameters()
-                      None entries for unused params (allow_unused=True)
-          query_loss: float — outer loop loss value for logging
+        Args:
+            task:               Task namedtuple (support + query splits)
+            return_query_loss:  If True, include scalar query loss in return value
+            return_inner_losses: If True (lora_maml only), include list[float] of
+                                 per-step mean support losses in return value
+
+        Returns (lora_maml mode, both flags True):
+            (grads, query_loss, inner_losses)
+        Returns (any mode, return_query_loss only):
+            (grads, query_loss)
+        Returns (default):
+            grads
         """
-        if self.config.mode == "full":
-            return self._full_maml(support_audio, support_labels, query_audio, query_labels)
-        elif self.config.mode == "fomaml":
-            return self._fomaml(support_audio, support_labels, query_audio, query_labels)
-        elif self.config.mode == "reptile":
-            return self._reptile(support_audio, support_labels, query_audio, query_labels)
-        else:
-            raise ValueError(f"Unknown MAML mode: {self.config.mode}")
+        if self.mode == "second_order_ctc":
+            return self._compute_meta_gradient_second_order(task, return_query_loss)
+        if self.mode == "lora_maml":
+            return self._compute_meta_gradient_lora_maml(
+                task, return_query_loss, return_inner_losses
+            )
+        return self._compute_meta_gradient_fomaml(task, return_query_loss)
 
-    def _full_maml(
+    def _compute_meta_gradient_fomaml(
         self,
-        support_audio: torch.Tensor,
-        support_labels: torch.Tensor,
-        query_audio: torch.Tensor,
-        query_labels: torch.Tensor,
-    ) -> Tuple[List[Optional[torch.Tensor]], float]:
-        """
-        Full second-order MAML via `higher`.
+        task: "Task",
+        return_query_loss: bool = False,
+    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], float]:
+        """FOMAML path: first-order approximation via deepcopy + manual SGD."""
+        adapted = copy.deepcopy(self.model.model)
+        adapted.train()
+        dtype = next(adapted.parameters()).dtype
 
-        track_higher_grads=True: backpropagation flows THROUGH the inner loop
-        (Hessian term included). This is the exact Per-FedAvg gradient.
+        lm_head_params = list(adapted.lm_head.parameters())
+        encoder_params = list(adapted.wav2vec2.parameters())
 
-        Inner optimizer: lm_head only (ANIL — I7).
-        Outer gradient: flows through lm_head adaptation back into wav2vec2 encoder.
+        for _step in range(self.inner_steps):
+            head_grads, _ = _accumulate_grads_over_clips(
+                adapted,
+                task.support_audio,
+                task.support_labels,
+                lm_head_params,
+                self.processor,
+                self.device,
+                dtype,
+            )
+            for p, g in zip(lm_head_params, head_grads):
+                p.data = p.data - self.inner_lr * g
+            del head_grads
 
-        Requires ~80GB VRAM for Wav2Vec2 with K=3. Use A100.
-        """
-        inner_opt = torch.optim.SGD(
-            self.model.get_inner_loop_params(),
-            lr=self.config.inner_lr,
+        enc_grads, query_loss_val = _accumulate_grads_over_clips(
+            adapted,
+            task.query_audio,
+            task.query_labels,
+            encoder_params,
+            self.processor,
+            self.device,
+            dtype,
         )
 
-        autocast_ctx = torch.autocast(
-            "cuda",
-            dtype=torch.bfloat16,
-            enabled=self.config.use_bf16 and torch.cuda.is_available(),
-        )
+        result = [g.clone().detach() for g in enc_grads]
+
+        del adapted, enc_grads
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        if return_query_loss:
+            return result, query_loss_val
+        return result
+
+    def _compute_meta_gradient_second_order(
+        self,
+        task: "Task",
+        return_query_loss: bool = False,
+    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], float]:
+        """Second-order MAML via higher + custom differentiable CTC.
+
+        Uses higher.innerloop_ctx with track_higher_grads=True to retain the
+        computation graph through inner-loop updates. The custom CTC loss
+        (ctc.differentiable_ctc) provides the double-backward support that
+        nn.CTCLoss lacks.
+
+        Clips are processed one at a time (VRAM budget), with losses
+        accumulated via the differentiable CTC's batch interface.
+        """
+        import higher
+
+        from ctc.differentiable_ctc import ctc_loss_differentiable
+
+        dtype = next(self.model.model.parameters()).dtype
+                                               
+        inner_params = list(self.model.model.lm_head.parameters())
+        inner_opt = torch.optim.SGD(inner_params, lr=self.inner_lr)
 
         with higher.innerloop_ctx(
             self.model.model,
             inner_opt,
             copy_initial_weights=False,
-            track_higher_grads=True,  # second-order: Hessian term included
+            track_higher_grads=True,
+            override={"lr": [self.inner_lr]},
+        ) as (fmodel, diffopt):
+                                                
+            for _step in range(self.inner_steps):
+                step_losses = []
+                for audio, text in zip(task.support_audio, task.support_labels):
+                    input_values = _encode_audio(audio, self.processor, self.device, dtype)
+                    labels = _encode_labels(text, self.processor, self.device)
+
+                    out = fmodel(input_values=input_values)
+                    logits = out.logits                    
+                    T_frames = logits.shape[1]
+
+                    input_lengths = torch.tensor([T_frames], device=self.device)
+                    target_lengths = torch.tensor(
+                        [(labels[0] != -100).sum().item()], device=self.device
+                    )
+
+                    loss_clip = ctc_loss_differentiable(
+                        logits, labels, input_lengths, target_lengths, blank=0
+                    )
+                    step_losses.append(loss_clip)
+
+                step_loss = torch.stack(step_losses).mean()
+                diffopt.step(step_loss)
+
+            query_losses = []
+            for audio, text in zip(task.query_audio, task.query_labels):
+                input_values = _encode_audio(audio, self.processor, self.device, dtype)
+                labels = _encode_labels(text, self.processor, self.device)
+
+                out = fmodel(input_values=input_values)
+                logits = out.logits
+                T_frames = logits.shape[1]
+
+                input_lengths = torch.tensor([T_frames], device=self.device)
+                target_lengths = torch.tensor(
+                    [(labels[0] != -100).sum().item()], device=self.device
+                )
+
+                loss_clip = ctc_loss_differentiable(
+                    logits, labels, input_lengths, target_lengths, blank=0
+                )
+                query_losses.append(loss_clip)
+
+            query_loss = torch.stack(query_losses).mean()
+
+        encoder_params = list(self.model.model.wav2vec2.parameters())
+        meta_grads_raw = torch.autograd.grad(
+            query_loss, encoder_params, allow_unused=True
+        )
+
+        result = []
+        for p, g in zip(encoder_params, meta_grads_raw):
+            result.append(g.clone().detach() if g is not None else torch.zeros_like(p))
+
+        query_loss_val = query_loss.item()
+
+        del meta_grads_raw
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        if return_query_loss:
+            return result, query_loss_val
+        return result
+
+    def _compute_meta_gradient_lora_maml(
+        self,
+        task: "Task",
+        return_query_loss: bool = False,
+        return_inner_losses: bool = False,
+    ):
+        """True second-order MAML over LoRA + lm_head (FedLoRA-MAML).
+
+        Uses higher.innerloop_ctx with track_higher_grads=True to retain the
+        computation graph through inner-loop steps. ~320K trainable params are
+        in the inner loop (LoRA A/B + lm_head), making full second-order MAML
+        feasible on an RTX 4070 Super.
+
+        This is TRUE second-order MAML — not a first-order approximation.
+        The Hessian captures:
+          (a) LoRA subspace curvature — how adaptation changes gradient landscape
+          (b) CTC alignment curvature — how alignment paths shift during adaptation
+        Both terms flow through ctc/differentiable_ctc.py.
+
+        No ANIL split: both LoRA and lm_head are outer-loop meta-gradient targets
+        (aggregated by FL server). self.model.get_outer_loop_params() returns all
+        trainable params.
+
+        NOTE: do NOT call model.train() — wav2vec2's dropout + higher's functional
+        patching produces NaN logits. Gradients flow correctly in eval mode.
+
+        Requires higher>=0.2.1.
+        """
+        import higher
+
+        from ctc.differentiable_ctc import ctc_loss_differentiable
+
+        dtype = next(self.model.model.parameters()).dtype
+
+        WAV_STRIDE = 320
+
+        def _clip_audio(a: torch.Tensor, S: int) -> torch.Tensor | None:
+            """Truncate to max_audio_samples, but skip if T < 2*S−1 after truncation.
+
+            CTC requires T ≥ 2*S−1 (blank between every label). If the clip would
+            be too short after truncation, return None to signal skip.
+            """
+            clipped = a[: self.max_audio_samples] if (
+                self.max_audio_samples is not None and len(a) > self.max_audio_samples
+            ) else a
+            T_est = len(clipped) // WAV_STRIDE
+            if T_est < 2 * S - 1:
+                return None
+            return clipped
+
+        inner_params = self.model.get_outer_loop_params()
+        inner_opt = torch.optim.SGD(inner_params, lr=self.inner_lr)
+        inner_step_losses: list[float] = []
+
+        with higher.innerloop_ctx(
+            self.model.model,
+            inner_opt,
+            copy_initial_weights=False,
+            track_higher_grads=True,
+            override={"lr": [self.inner_lr]},
         ) as (fmodel, diffopt):
 
-            for _ in range(self.config.k):
-                with autocast_ctx:
-                    out = fmodel(input_values=support_audio, labels=support_labels)
-                diffopt.step(out.loss)  # differentiable lm_head update
+            for _step in range(self.inner_steps):
+                step_losses = []
+                for audio, text in zip(task.support_audio, task.support_labels):
+                    labels = _encode_labels(text, self.processor, self.device)
+                    S = int((labels[0] != -100).sum().item())
+                    clipped = _clip_audio(audio, S)
+                    if clipped is None:
+                        del labels
+                        continue
 
-            with autocast_ctx:
-                query_out = fmodel(input_values=query_audio, labels=query_labels)
+                    input_values = _encode_audio(clipped, self.processor, self.device, dtype)
+                    out = fmodel(input_values=input_values)
+                    logits = out.logits
+                    T_frames = logits.shape[1]
 
-        # d(query_loss)/d(θ*) — flows through k inner steps (second-order)
-        meta_grads = torch.autograd.grad(
-            query_out.loss,
-            self.model.model.parameters(),
-            allow_unused=True,
-            retain_graph=False,
+                    loss_clip = ctc_loss_differentiable(
+                        logits,
+                        labels,
+                        torch.tensor([T_frames], device=self.device),
+                        torch.tensor([S], device=self.device),
+                        blank=0,
+                    ) / max(S, 1)  # normalize by label count → per-token loss
+                    step_losses.append(loss_clip)
+
+                if not step_losses:
+                    inner_step_losses.append(float("nan"))
+                    continue
+                step_mean = torch.stack(step_losses).mean()
+                inner_step_losses.append(step_mean.item())
+                diffopt.step(step_mean)
+
+            # Measure support loss at the final adapted state (θ_k).
+            # The loop above logs pre-step losses only, so without this we'd
+            # never see whether the last gradient step actually helped.
+            final_sup_losses = []
+            for audio, text in zip(task.support_audio, task.support_labels):
+                labels = _encode_labels(text, self.processor, self.device)
+                S = int((labels[0] != -100).sum().item())
+                clipped = _clip_audio(audio, S)
+                if clipped is None:
+                    del labels
+                    continue
+                input_values = _encode_audio(clipped, self.processor, self.device, dtype)
+                with torch.no_grad():
+                    out = fmodel(input_values=input_values)
+                logits = out.logits
+                T_frames = logits.shape[1]
+                loss_clip = ctc_loss_differentiable(
+                    logits,
+                    labels,
+                    torch.tensor([T_frames], device=self.device),
+                    torch.tensor([S], device=self.device),
+                    blank=0,
+                ) / max(S, 1)
+                final_sup_losses.append(loss_clip.item())
+            if final_sup_losses:
+                inner_step_losses.append(sum(final_sup_losses) / len(final_sup_losses))
+            else:
+                inner_step_losses.append(float("nan"))
+
+            query_losses = []
+            for audio, text in zip(task.query_audio, task.query_labels):
+                labels = _encode_labels(text, self.processor, self.device)
+                S = int((labels[0] != -100).sum().item())
+                clipped = _clip_audio(audio, S)
+                if clipped is None:
+                    del labels
+                    continue
+
+                input_values = _encode_audio(clipped, self.processor, self.device, dtype)
+                out = fmodel(input_values=input_values)
+                logits = out.logits
+                T_frames = logits.shape[1]
+
+                loss_clip = ctc_loss_differentiable(
+                    logits,
+                    labels,
+                    torch.tensor([T_frames], device=self.device),
+                    torch.tensor([S], device=self.device),
+                    blank=0,
+                ) / max(S, 1)  # normalize by label count — consistent with inner loop
+                query_losses.append(loss_clip)
+
+            if not query_losses:
+                outer_params_early = self.model.get_outer_loop_params()
+                result_zero = [torch.zeros_like(p) for p in outer_params_early]
+                if return_query_loss and return_inner_losses:
+                    return result_zero, 0.0, inner_step_losses
+                if return_query_loss:
+                    return result_zero, 0.0
+                if return_inner_losses:
+                    return result_zero, inner_step_losses
+                return result_zero
+
+            query_loss = torch.stack(query_losses).mean()
+
+        outer_params = self.model.get_outer_loop_params()
+        meta_grads_raw = torch.autograd.grad(
+            query_loss, outer_params, allow_unused=True
         )
-        return list(meta_grads), query_out.loss.item()
 
-    def _fomaml(
-        self,
-        support_audio: torch.Tensor,
-        support_labels: torch.Tensor,
-        query_audio: torch.Tensor,
-        query_labels: torch.Tensor,
-    ) -> Tuple[List[Optional[torch.Tensor]], float]:
-        """
-        First-order MAML (FOMAML) — native PyTorch implementation.
+        result: list[torch.Tensor] = []
+        for p, g in zip(outer_params, meta_grads_raw):
+            if g is not None:
+                result.append(g.clone().detach())
+            else:
+                result.append(torch.zeros_like(p))
 
-        Equivalent to learn2learn MAML(first_order=True) but without
-        the Cython dependency that breaks on Python 3.13+.
+        query_loss_val = query_loss.item()
 
-        Approximation: gradient at θ_i' treated as if it came from θ*
-        (no backprop through inner loop — no Hessian term).
+        del meta_grads_raw
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-        Steps:
-          1. Save initial model state
-          2. Run k inner gradient steps on lm_head using support set
-          3. Evaluate on query set from adapted state
-          4. Compute gradient at adapted params (create_graph=False → FOMAML)
-          5. Restore original model state
-        """
-        # Save initial state for restoration
-        init_state = copy.deepcopy(self.model.model.state_dict())
+        if return_query_loss and return_inner_losses:
+            return result, query_loss_val, inner_step_losses
+        if return_query_loss:
+            return result, query_loss_val
+        if return_inner_losses:
+            return result, inner_step_losses
+        return result
 
-        # Inner loop: k SGD steps on lm_head only (ANIL)
-        inner_opt = torch.optim.SGD(
-            self.model.get_inner_loop_params(),
-            lr=self.config.inner_lr,
+def _perturb_lm_head(model_copy: nn.Module, noise_std: float = 0.3) -> None:
+    """Add Gaussian noise N(0, noise_std²) to lm_head weights."""
+    with torch.no_grad():
+        for p in model_copy.lm_head.parameters():
+            p.add_(noise_std * torch.randn_like(p))
+
+def compute_wer_k0(
+    model: "Wav2Vec2MAML",
+    processor,
+    audio_clips: list,
+    label_texts: list[str],
+    device: torch.device,
+    perturb_lm_head_std: float = 0.0,
+) -> float:
+    """WER with zero adaptation steps."""
+    from jiwer import wer as _wer
+
+    model_copy = copy.deepcopy(model)
+    if perturb_lm_head_std > 0:
+        _perturb_lm_head(model_copy.model, perturb_lm_head_std)
+
+    dtype = next(model_copy.model.parameters()).dtype
+    model_copy.model.eval()
+    hypotheses = []
+    with torch.no_grad():
+        for audio in audio_clips:
+            input_values = _encode_audio(audio, processor, device, dtype)
+            out = model_copy.model(input_values=input_values)
+            pred_ids = torch.argmax(out.logits, dim=-1)
+            hyp = processor.batch_decode(pred_ids)[0]
+            hypotheses.append(hyp)
+    return float(_wer(label_texts, hypotheses))
+
+def compute_wer_k3(
+    model: "Wav2Vec2MAML",
+    processor,
+    support_audio: list,
+    support_labels: list[str],
+    query_audio: list,
+    query_labels: list[str],
+    inner_steps: int = 3,
+    inner_lr: float = 1e-4,
+    device: torch.device = torch.device("cpu"),
+    perturb_lm_head_std: float = 0.0,
+) -> float:
+    """WER after k inner-loop adaptation steps on support set. Name 'k3' is historical."""
+    from jiwer import wer as _wer
+
+    model_copy = copy.deepcopy(model)
+    if perturb_lm_head_std > 0:
+        _perturb_lm_head(model_copy.model, perturb_lm_head_std)
+
+    dtype = next(model_copy.model.parameters()).dtype
+    model_copy.model.train()
+
+    lm_head_params = list(model_copy.model.lm_head.parameters())
+
+    for _ in range(inner_steps):
+        head_grads, _ = _accumulate_grads_over_clips(
+            model_copy.model,
+            support_audio,
+            support_labels,
+            lm_head_params,
+            processor,
+            device,
+            dtype,
         )
-        for _ in range(self.config.k):
-            inner_opt.zero_grad()
-            out = self.model(input_values=support_audio, labels=support_labels)
-            out.loss.backward()
-            inner_opt.step()
+        for p, g in zip(lm_head_params, head_grads):
+            p.data = p.data - inner_lr * g
+        del head_grads
 
-        # Evaluate at adapted params — FOMAML: no graph through inner loop
-        self.model.model.zero_grad()
-        autocast_ctx = torch.autocast(
-            "cuda",
-            dtype=torch.bfloat16,
-            enabled=self.config.use_bf16 and torch.cuda.is_available(),
-        )
-        with autocast_ctx:
-            query_out = self.model(input_values=query_audio, labels=query_labels)
+    model_copy.model.eval()
+    hypotheses = []
+    with torch.no_grad():
+        for audio in query_audio:
+            input_values = _encode_audio(audio, processor, device, dtype)
+            out = model_copy.model(input_values=input_values)
+            pred_ids = torch.argmax(out.logits, dim=-1)
+            hyp = processor.batch_decode(pred_ids)[0]
+            hypotheses.append(hyp)
 
-        # create_graph=False: first-order approximation (no Hessian)
-        meta_grads = torch.autograd.grad(
-            query_out.loss,
-            self.model.model.parameters(),
-            allow_unused=True,
-            retain_graph=False,
-            create_graph=False,
-        )
-        query_loss_val = query_out.loss.item()
+    return float(_wer(query_labels, hypotheses))
 
-        # Restore initial params (do not permanently update model)
-        self.model.model.load_state_dict(init_state)
+def compute_wer_at_k(
+    model: "Wav2Vec2MAML",
+    processor,
+    support_audio: list,
+    support_labels: list[str],
+    query_audio: list,
+    query_labels: list[str],
+    k: int,
+    inner_lr: float = 1e-4,
+    device: torch.device = torch.device("cpu"),
+) -> float:
+    """WER at exactly k adaptation steps, no perturbation.
 
-        return list(meta_grads), query_loss_val
-
-    def _reptile(
-        self,
-        support_audio: torch.Tensor,
-        support_labels: torch.Tensor,
-        query_audio: torch.Tensor,
-        query_labels: torch.Tensor,
-    ) -> Tuple[List[Optional[torch.Tensor]], float]:
-        """
-        Reptile: meta-gradient = (θ_init - θ_adapted) / k.
-
-        Runs k SGD steps on the full model, then computes the difference
-        between initial and adapted weights as a pseudo-gradient.
-        Restores initial params before returning.
-
-        The query set is used only for loss reporting (no gradient computation).
-        """
-        # Save initial params
-        init_params = [p.data.clone() for p in self.model.model.parameters()]
-
-        inner_opt = torch.optim.SGD(
-            self.model.model.parameters(),
-            lr=self.config.inner_lr,
-        )
-        for _ in range(self.config.k):
-            inner_opt.zero_grad()
-            out = self.model(input_values=support_audio, labels=support_labels)
-            out.loss.backward()
-            inner_opt.step()
-
-        # Meta-gradient = direction from adapted back to init
-        meta_grads = [
-            (init - p.data)
-            for init, p in zip(init_params, self.model.model.parameters())
-        ]
-
-        # Restore initial params
-        for p, init in zip(self.model.model.parameters(), init_params):
-            p.data.copy_(init)
-
-        with torch.no_grad():
-            query_out = self.model(input_values=query_audio, labels=query_labels)
-
-        return meta_grads, query_out.loss.item()
-
-    def adapt(
-        self,
-        audio: torch.Tensor,
-        labels: torch.Tensor,
-        k: Optional[int] = None,
-    ) -> "Wav2Vec2ForCTC":
-        """
-        Personalize for a new user at inference time.
-
-        Returns an adapted model copy (does NOT modify self.model).
-        Runs k SGD steps on lm_head using the provided support clips.
-
-        k defaults to config.k.
-        """
-        from transformers import Wav2Vec2ForCTC
-
-        k = k or self.config.k
-        adapted = copy.deepcopy(self.model.model)
-        adapted = adapted.to(audio.device)
-
-        opt = torch.optim.SGD(
-            adapted.lm_head.parameters(),
-            lr=self.config.inner_lr,
-        )
-        for _ in range(k):
-            opt.zero_grad()
-            out = adapted(input_values=audio, labels=labels)
-            out.loss.backward()
-            opt.step()
-
-        return adapted
+    Convenience wrapper over compute_wer_k0 (k=0) and compute_wer_k3 (k>0).
+    Use this for adaptation curve generation on genuinely unseen VCTK speakers.
+    """
+    if k == 0:
+        return compute_wer_k0(model, processor, query_audio, query_labels, device,
+                               perturb_lm_head_std=0.0)
+    return compute_wer_k3(model, processor, support_audio, support_labels,
+                           query_audio, query_labels, k, inner_lr, device,
+                           perturb_lm_head_std=0.0)

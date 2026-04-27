@@ -1,200 +1,113 @@
-"""
-federated/client_maml.py — Flower client for Per-FedAvg MAML
+"""Flower client for FOMAML-ANIL. Returns encoder meta-gradients per round."""
 
-Implements fl.client.NumPyClient for federated MAML personalization.
-
-Critical invariants:
-  I3: get_parameters() returns ENCODER params only — lm_head never transmitted
-  I4: fit() returns META-GRADIENTS (∇L_meta_private) — not weight updates
-  I5: DP applied manually via privacy/dp_meta.py — no Opacus
-
-The FL server (PerFedAvgStrategy) treats the returned arrays as gradients
-and applies the outer learning rate β:
-  θ* ← θ* − β · weighted_avg(meta_grads_across_cohort)
-
-This is NOT standard FedAvg weight averaging. The "parameters" returned
-by fit() are gradient tensors, not model weights.
-"""
-
-from typing import Dict, List, Optional, Tuple
+from __future__ import annotations
 
 import numpy as np
 import torch
 import flwr as fl
+from flwr.common import (
+    FitIns,
+    FitRes,
+    GetParametersIns,
+    GetParametersRes,
+    Parameters,
+    Status,
+    Code,
+    ndarrays_to_parameters,
+    parameters_to_ndarrays,
+)
 
+from models.wav2vec2_maml import Wav2Vec2MAML, load_processor
 from data.task_sampler import VoiceTaskSampler
 from maml.engine import MAMLEngine
-from maml.meta_eval import evaluate_adaptation_at_k
-from models.wav2vec2_maml import Wav2Vec2MAML
-from privacy.dp_meta import DPConfig, apply_dp_to_meta_gradient
-from privacy.rdp_accountant import RDPAccountant
 
-
-class MAMLClient(fl.client.NumPyClient):
-    """
-    Flower client implementing Per-FedAvg for Wav2Vec2 personalization.
-
-    fit() computes the MAML meta-gradient (outer loop gradient ∇L_meta),
-    applies DP sanitization (I5), and returns the sanitized gradient as
-    numpy arrays. The server applies these as gradient updates to θ*.
-
-    evaluate() runs k-step adaptation on local data and reports WER.
-    This is the personalized evaluation — not the global model quality.
-    """
+class MAMLClient(fl.client.Client):
+    """Flower client implementing PerFedAvg (FOMAML-ANIL)."""
 
     def __init__(
         self,
-        node_id: str,
-        model: Wav2Vec2MAML,
-        engine: MAMLEngine,
-        task_sampler: VoiceTaskSampler,
-        dp_config: DPConfig,
-        accountant: RDPAccountant,
-    ) -> None:
-        self.node_id = node_id
-        self.model = model
-        self.engine = engine
-        self.sampler = task_sampler
-        self.dp = dp_config
-        self.accountant = accountant
+        node_dir: str | Path,
+        device: str | torch.device = "cpu",
+        inner_steps: int = 3,
+        inner_lr: float = 1e-4,
+        support_size: int = 8,
+        query_size: int = 8,
+        max_grad_norm: float = 10.0,
+    ):
+        self.device = torch.device(device)
+        self.model = Wav2Vec2MAML(device=self.device)
+        if self.device.type == "cuda":
+            self.model.to_bf16()
+        else:
+                                                                             
+            self.model.strip_weight_parametrizations()
 
-    def get_parameters(self, config: Dict) -> List[np.ndarray]:
-        """
-        Return encoder (outer loop) parameters as numpy arrays.
+        self.processor = load_processor()
+        self.sampler = VoiceTaskSampler(node_dir, support_size, query_size)
+        self.engine = MAMLEngine(
+            self.model, self.processor, inner_steps, inner_lr, self.device
+        )
+        self._max_grad_norm = max_grad_norm
 
-        I3: lm_head is intentionally excluded. It stays local to the node
-        and is the personalization component.
-        """
-        return [
-            p.data.cpu().numpy()
+        print(f"[client] Node dir: {Path(node_dir).name[:16]} | clips: {self.sampler.num_clips}")
+
+    def get_parameters(self, ins: GetParametersIns) -> GetParametersRes:
+        """Return encoder weights as float16 (lm_head excluded — Invariant I3)."""
+        ndarrays = [
+            p.detach().half().cpu().numpy()
             for p in self.model.get_outer_loop_params()
         ]
-
-    def set_parameters(self, parameters: List[np.ndarray]) -> None:
-        """
-        Set encoder parameters from server broadcast.
-
-        Only outer loop (encoder) params are updated. lm_head is not
-        touched — it retains its locally-adapted state.
-        """
-        for p, val in zip(self.model.get_outer_loop_params(), parameters):
-            p.data = torch.tensor(val, dtype=p.dtype, device=p.device)
-
-    def fit(
-        self,
-        parameters: List[np.ndarray],
-        config: Dict,
-    ) -> Tuple[List[np.ndarray], int, Dict]:
-        """
-        Run MAML inner + outer loop, return DP-sanitized meta-gradient.
-
-        I4: Returns meta-gradients (∇L_meta_private) as 'parameters'.
-            These have the same shape as the encoder parameters.
-            The server's PerFedAvgStrategy applies outer_lr β:
-              θ* ← θ* − β · weighted_avg(meta_grads)
-
-        Workflow:
-          1. Set encoder params from server broadcast
-          2. Check DP budget — skip round if exhausted
-          3. Sample task (support + query split, I6)
-          4. Compute meta-gradient via MAML engine
-          5. Extract outer-loop (encoder) portion
-          6. Apply DP: clip + Gaussian noise (I5)
-          7. Update RDP accountant
-          8. Return sanitized gradient as numpy + metrics
-        """
-        self.set_parameters(parameters)
-
-        if self.accountant.is_exhausted():
-            print(f"[{self.node_id}] DP budget exhausted — skipping round")
-            return self.get_parameters({}), 0, {"dp_exhausted": True}
-
-        support_a, support_l, query_a, query_l = self.sampler.sample_task()
-
-        meta_grads, query_loss = self.engine.compute_meta_gradient(
-            support_a, support_l, query_a, query_l
+        return GetParametersRes(
+            status=Status(code=Code.OK, message=""),
+            parameters=ndarrays_to_parameters(ndarrays),
         )
 
-        outer_grads = self._extract_outer_grads(meta_grads)
-
-        if self.dp.enabled:
-            sanitized, grad_norm = apply_dp_to_meta_gradient(
-                outer_grads, self.dp.C, self.dp.sigma
+    def set_parameters(self, parameters: Parameters) -> None:
+        """Load encoder weights from server. lm_head untouched (Invariant I3)."""
+        ndarrays = parameters_to_ndarrays(parameters)
+        outer_params = self.model.get_outer_loop_params()
+        if len(ndarrays) != len(outer_params):
+            raise ValueError(
+                f"Parameter count mismatch: received {len(ndarrays)}, "
+                f"expected {len(outer_params)}"
             )
-            self.accountant.step(
-                noise_multiplier=self.dp.sigma,
-                sample_rate=self.dp.sample_rate,
-            )
-        else:
-            sanitized = [g.detach() if g is not None else None for g in outer_grads]
-            grad_norm = float(
-                torch.cat([
-                    g.flatten() for g in outer_grads if g is not None
-                ]).norm(2).item()
-            ) if any(g is not None for g in outer_grads) else 0.0
+        with torch.no_grad():
+            for p, arr in zip(outer_params, ndarrays):
+                p.copy_(torch.tensor(arr, dtype=p.dtype, device=self.device))
 
-        grad_numpy = [
-            g.cpu().numpy() if g is not None
-            else np.zeros(p.shape, dtype=np.float32)
-            for g, p in zip(sanitized, self.model.get_outer_loop_params())
-        ]
-
-        n_samples = len(support_a) + len(query_a)
-
-        metrics: Dict = {
-            "query_loss": float(query_loss),
-            "grad_norm": float(grad_norm),
-            "node_id": self.node_id,
-        }
-        if self.dp.enabled:
-            metrics["epsilon"] = float(self.accountant.get_epsilon())
-
-        return grad_numpy, n_samples, metrics
-
-    def evaluate(
-        self,
-        parameters: List[np.ndarray],
-        config: Dict,
-    ) -> Tuple[float, int, Dict]:
+    def fit(self, ins: FitIns) -> FitRes:
         """
-        k-step adaptation evaluation. Returns WER after personalization.
+        Run one FOMAML episode.
 
-        Evaluates both θ* directly (k=0) and adapted model (k=config.k)
-        to measure adaptation gain per round.
+        Returns meta-gradients encoded as parameters (Invariant I4:
+        these are gradients, not weight updates).
         """
-        self.set_parameters(parameters)
+        self.set_parameters(ins.parameters)
 
-        k = self.engine.config.k
-        wer_results = evaluate_adaptation_at_k(
-            self.model, self.engine, self.sampler,
-            k_values=[0, k],
+        task = self.sampler.sample_task()
+        meta_grads = self.engine.compute_meta_gradient(task)
+
+        total_norm = sum(g.float().norm() ** 2 for g in meta_grads) ** 0.5
+        clip_coef = self._max_grad_norm / (total_norm.item() + 1e-6)
+        if clip_coef < 1.0:
+            meta_grads = [g * clip_coef for g in meta_grads]
+
+        grad_arrays = [g.half().cpu().numpy() for g in meta_grads]
+
+        num_examples = len(task.support_audio) + len(task.query_audio)
+        return FitRes(
+            status=Status(code=Code.OK, message=""),
+            parameters=ndarrays_to_parameters(grad_arrays),
+            num_examples=num_examples,
+            metrics={},
         )
 
-        wer_0 = wer_results["k=0"]
-        wer_k = wer_results[f"k={k}"]
-
-        return wer_k, self.sampler.total_clips, {
-            "wer": wer_k,
-            "wer_0shot": wer_0,
-            "adaptation_gain": round(wer_0 - wer_k, 4),
-            "node_id": self.node_id,
-        }
-
-    def _extract_outer_grads(
-        self,
-        all_grads: List[Optional[torch.Tensor]],
-    ) -> List[Optional[torch.Tensor]]:
-        """
-        all_grads is aligned with model.model.parameters() (ALL params).
-        Extract only the outer loop (encoder) parameter gradients.
-
-        Uses id(p) matching to correctly identify encoder params,
-        since model.get_outer_loop_params() returns the same objects.
-        """
-        all_params = list(self.model.model.parameters())
-        outer_param_ids = {id(p) for p in self.model.get_outer_loop_params()}
-
-        return [
-            g for p, g in zip(all_params, all_grads)
-            if id(p) in outer_param_ids
-        ]
+    def evaluate(self, ins):
+        """Not used in PoC — evaluation is done centrally via eval_poc.py."""
+        from flwr.common import EvaluateRes
+        return EvaluateRes(
+            status=Status(code=Code.OK, message=""),
+            loss=0.0,
+            num_examples=0,
+            metrics={},
+        )

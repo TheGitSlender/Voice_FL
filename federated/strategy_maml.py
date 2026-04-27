@@ -1,176 +1,278 @@
 """
-federated/strategy_maml.py — Per-FedAvg aggregation strategy
+PerFedAvg aggregation strategy for Flower.
 
-Implements the Per-FedAvg server-side aggregation rule:
-  θ* ← θ* − β · weighted_avg(∇L_meta_clients)
+On each round:
+  1. Collect meta-gradients from all selected clients (encoded as parameters)
+  2. Compute weighted average: avg_grad = Σ(n_i * g_i) / Σ(n_i)
+  3. Apply outer update: θ* ← θ* − β · avg_grad
+  4. Return updated θ* as the new global parameters
 
-Standard FedAvg:  θ_new = weighted_avg(θ_clients)     [weight averaging]
-Per-FedAvg:       θ* ← θ* − β · avg(meta_grads)       [gradient descent on meta-objective]
-
-Clients return meta-gradients shaped like the encoder parameters.
-This strategy treats them as gradients and applies outer lr β — NOT as weights.
-
-BAE screening (optional): meta-gradients are screened before averaging.
-Anomalous gradients (Byzantine, poisoning, free-rider) get zero weight.
+This is NOT standard FedAvg weight averaging (Invariant I4).
+The server never sees node data, speaker IDs, or lm_head parameters.
 """
 
-from typing import Dict, List, Optional, Tuple
+from __future__ import annotations
+
+import math
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import flwr as fl
 from flwr.common import (
-    Parameters,
+    FitIns,
     FitRes,
+    Parameters,
+    Scalar,
     ndarrays_to_parameters,
     parameters_to_ndarrays,
 )
-from flwr.server.strategy import FedAvg
+from flwr.server.client_proxy import ClientProxy
+
+from maml.tracking import Tracker
+
+# Metric keys that clients may send in FitRes.metrics
+_CLIENT_METRIC_KEYS = (
+    "query_loss",
+    "grad_norm",
+    "clip_coef",
+    "inner_loss_init",
+    "inner_loss_final",
+)
 
 
-class PerFedAvgStrategy(FedAvg):
+class PerFedAvgStrategy(fl.server.strategy.Strategy):
     """
-    Per-FedAvg: aggregate meta-gradients and apply outer learning rate β.
+    Per-FedAvg: server maintains θ* and applies gradient descent each round.
 
-    The server maintains current_params (encoder weights θ*) and updates
-    them each round via gradient descent on the averaged meta-gradient.
-
-    current_params is initialized from the first client's get_parameters()
-    call (Flower's default behavior when initialize_parameters returns None).
+    Args:
+        initial_parameters:    encoder/LoRA weights as Flower Parameters
+        outer_lr:              β — server-side learning rate (default 2e-4)
+        min_available_clients: minimum clients before server starts
+        fraction_fit:          fraction of available clients to use per round
+        checkpoint_dir:        if set, save θ* every `checkpoint_every` rounds
+        checkpoint_every:      rounds between checkpoints (default 10)
+        param_names:           parameter names for checkpoint state_dict keys
+        experiment_name:       MLflow experiment name
+        tracking_uri:          MLflow tracking URI (overridden by MLFLOW_TRACKING_URI env)
     """
 
     def __init__(
         self,
+        initial_parameters: Parameters,
         outer_lr: float = 2e-4,
-        bae=None,
-        mlflow_run=None,
-        **kwargs,
-    ) -> None:
-        super().__init__(**kwargs)
-        self.outer_lr = outer_lr
-        self.bae = bae
-        self.mlflow_run = mlflow_run
-        self.current_params: Optional[List[np.ndarray]] = None
+        min_available_clients: int = 5,
+        fraction_fit: float = 1.0,
+        checkpoint_dir: Optional[str] = None,
+        checkpoint_every: int = 10,
+        param_names: Optional[List[str]] = None,
+        experiment_name: str = "fedlora_maml_vctk",
+        tracking_uri: str = "mlruns",
+        round_offset: int = 0,
+        # AdamW outer optimizer hyperparameters
+        adam_beta1: float = 0.9,
+        adam_beta2: float = 0.999,
+        adam_eps: float = 1e-8,
+        weight_decay: float = 1e-4,
+        # Cosine LR schedule with linear warmup
+        total_rounds: int = 200,
+        warmup_rounds: int = 20,
+    ):
+        super().__init__()
+        self.base_outer_lr = outer_lr
+        self.outer_lr = outer_lr  # updated each round by schedule
+        self.fraction_fit = fraction_fit
+        self.min_available_clients = min_available_clients
+        self._checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
+        self._checkpoint_every = checkpoint_every
+        self._param_names = param_names
+
+        self._theta_star: list[np.ndarray] = parameters_to_ndarrays(initial_parameters)
+        self._round_offset = round_offset
+
+        # AdamW moment buffers.
+        self._adam_m: list[np.ndarray] = [np.zeros_like(t, dtype=np.float32) for t in self._theta_star]
+        self._adam_v: list[np.ndarray] = [np.zeros_like(t, dtype=np.float32) for t in self._theta_star]
+        self._adam_t: int = 0
+        self._adam_beta1 = adam_beta1
+        self._adam_beta2 = adam_beta2
+        self._adam_eps = adam_eps
+        self._weight_decay = weight_decay
+
+        # LR schedule
+        self._total_rounds = total_rounds
+        self._warmup_rounds = warmup_rounds
+
+        self._tracker = Tracker(
+            experiment_name=experiment_name,
+            run_name="federated_run",
+            tracking_uri=tracking_uri,
+        )
+        self._tracker.log_params({
+            "outer_lr": outer_lr,
+            "adam_beta1": adam_beta1,
+            "adam_beta2": adam_beta2,
+            "weight_decay": weight_decay,
+            "warmup_rounds": warmup_rounds,
+            "total_rounds": total_rounds,
+            "min_available_clients": min_available_clients,
+            "fraction_fit": fraction_fit,
+            "checkpoint_every": checkpoint_every,
+            "n_params": len(self._theta_star),
+        })
+
+    def _schedule_lr(self, global_round: int) -> float:
+        """Cosine decay with linear warmup."""
+        if global_round <= self._warmup_rounds:
+            return self.base_outer_lr * global_round / max(self._warmup_rounds, 1)
+        progress = (global_round - self._warmup_rounds) / max(
+            self._total_rounds - self._warmup_rounds, 1
+        )
+        return self.base_outer_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    def initialize_parameters(self, client_manager) -> Optional[Parameters]:
+        return ndarrays_to_parameters(self._theta_star)
+
+    def configure_fit(
+        self, server_round: int, parameters: Parameters, client_manager
+    ) -> List[Tuple[ClientProxy, FitIns]]:
+        # Block until min_available_clients have connected, then sample
+        # fraction_fit of them.
+        num_sample = max(1, int(self.fraction_fit * self.min_available_clients))
+        clients = client_manager.sample(
+            num_clients=num_sample,
+            min_num_clients=self.min_available_clients,
+        )
+        fit_ins = FitIns(parameters=parameters, config={"round": server_round + self._round_offset})
+        return [(c, fit_ins) for c in clients]
 
     def aggregate_fit(
         self,
         server_round: int,
-        results: List[Tuple],
+        results: List[Tuple[ClientProxy, FitRes]],
         failures,
-    ) -> Tuple[Optional[Parameters], Dict]:
-        """
-        Aggregate meta-gradients and update θ*.
+    ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+        import gc
 
-        1. Extract meta-gradients and sample counts from results
-        2. BAE screening (if enabled) — adjusts per-node weights
-        3. Weighted average of verified meta-gradients
-        4. Apply: θ* ← θ* − β · avg_gradient
-        5. Update self.current_params and return as Parameters
-        """
+        global_round = server_round + self._round_offset
+
         if not results:
+            print(f"  [server] Round {global_round}: no results received")
             return None, {}
 
-        gradients: List[List[np.ndarray]] = []
-        weights: List[int] = []
-        metrics_per_node: Dict = {}
+        if failures:
+            print(f"  [server] Round {global_round}: {len(failures)} client failures")
 
-        for client_proxy, fit_res in results:
+        n_params = len(self._theta_star)
+        acc_grads = [np.zeros(t.shape, dtype=np.float32) for t in self._theta_star]
+        total_weight = 0
+
+        # Accumulators for weighted-average client diagnostics
+        metric_sums: dict[str, float] = {k: 0.0 for k in _CLIENT_METRIC_KEYS}
+        metric_weights: dict[str, float] = {k: 0.0 for k in _CLIENT_METRIC_KEYS}
+
+        for _client, fit_res in results:
             grads = parameters_to_ndarrays(fit_res.parameters)
-            gradients.append(grads)
-            weights.append(fit_res.num_examples)
-            metrics_per_node[client_proxy.cid] = fit_res.metrics
+            w = fit_res.num_examples
+            total_weight += w
+            for i, g in enumerate(grads):
+                acc_grads[i] += w * g.astype(np.float32)
 
-        # BAE screening: adjusts weights for anomalous nodes
-        if self.bae is not None:
-            grad_dict = {
-                results[i][0].cid: gradients[i]
-                for i in range(len(results))
-            }
-            node_weights = self.bae.screen_updates(grad_dict, server_round)
-            adjusted_weights = [
-                weights[i] * node_weights.get(results[i][0].cid, 1.0)
-                for i in range(len(results))
-            ]
-        else:
-            adjusted_weights = weights
+            for k in _CLIENT_METRIC_KEYS:
+                raw = fit_res.metrics.get(k)
+                if raw is not None:
+                    try:
+                        fv = float(raw)
+                        if not math.isnan(fv):
+                            metric_sums[k] += fv * w
+                            metric_weights[k] += w
+                    except (TypeError, ValueError):
+                        pass
 
-        total_weight = sum(adjusted_weights)
-        if total_weight == 0:
-            if self.current_params is not None:
-                return ndarrays_to_parameters(self.current_params), {}
-            return None, {}
+            del grads, fit_res
+            gc.collect()
 
-        # Weighted average of meta-gradients
-        avg_gradient = [
-            sum(w * g[i] for w, g in zip(adjusted_weights, gradients)) / total_weight
-            for i in range(len(gradients[0]))
-        ]
+        # AdamW outer update with cosine LR schedule
+        self.outer_lr = self._schedule_lr(global_round)
+        self._adam_t += 1
+        t = self._adam_t
+        b1, b2, eps = self._adam_beta1, self._adam_beta2, self._adam_eps
 
-        if self.current_params is None:
-            raise RuntimeError(
-                "current_params not initialized. Flower should have called "
-                "get_parameters on a client before aggregate_fit."
+        for i in range(n_params):
+            g = acc_grads[i] / total_weight
+            # Bias-corrected Adam moments
+            self._adam_m[i] = b1 * self._adam_m[i] + (1.0 - b1) * g
+            self._adam_v[i] = b2 * self._adam_v[i] + (1.0 - b2) * g * g
+            m_hat = self._adam_m[i] / (1.0 - b1 ** t)
+            v_hat = self._adam_v[i] / (1.0 - b2 ** t)
+            theta = self._theta_star[i].astype(np.float32)
+            # AdamW: weight decay applied to parameter, not gradient
+            self._theta_star[i] = (
+                theta * (1.0 - self.outer_lr * self._weight_decay)
+                - self.outer_lr * m_hat / (np.sqrt(v_hat) + eps)
             )
 
-        # Per-FedAvg update: θ* ← θ* − β · avg_gradient
-        updated_params = [
-            p - self.outer_lr * g
-            for p, g in zip(self.current_params, avg_gradient)
-        ]
-        self.current_params = updated_params
+        del acc_grads
+        gc.collect()
 
-        # MLflow logging
-        if self.mlflow_run is not None:
-            import mlflow
-
-            active_nodes = len([w for w in adjusted_weights if w > 0])
-            losses = [m.get("query_loss", 0) for m in metrics_per_node.values()]
-            epsilons = [m.get("epsilon", 0) for m in metrics_per_node.values() if "epsilon" in m]
-
-            metrics_to_log = {
-                "train/query_loss": float(np.mean(losses)),
-                "train/active_nodes": active_nodes,
-            }
-            if epsilons:
-                metrics_to_log["train/epsilon_avg"] = float(np.mean(epsilons))
-            mlflow.log_metrics(metrics_to_log, step=server_round)
-
-        return ndarrays_to_parameters(updated_params), {
-            "avg_query_loss": float(np.mean(
-                [m.get("query_loss", 0) for m in metrics_per_node.values()]
-            )),
-            "active_nodes": len([w for w in adjusted_weights if w > 0]),
+        avg_m: dict[str, float] = {
+            k: metric_sums[k] / metric_weights[k] if metric_weights[k] > 0 else float("nan")
+            for k in _CLIENT_METRIC_KEYS
         }
 
-    def aggregate_evaluate(self, server_round: int, results, failures):
-        """Aggregate per-node WER results."""
-        if not results:
-            return None, {}
+        print(
+            f"  [server] Round {global_round}: aggregated {len(results)} clients | "
+            f"β={self.outer_lr:.2e} | total_examples={total_weight} | "
+            f"avg_query_loss={avg_m['query_loss']:.4f} | "
+            f"avg_grad_norm={avg_m['grad_norm']:.4f} | "
+            f"inner {avg_m['inner_loss_init']:.4f}→{avg_m['inner_loss_final']:.4f}"
+        )
 
-        wers = [fit_res.metrics.get("wer", 1.0) for _, fit_res in results]
-        gains = [fit_res.metrics.get("adaptation_gain", 0.0) for _, fit_res in results]
+        self._tracker.log_metrics(
+            {
+                "server/n_clients": float(len(results)),
+                "server/total_examples": float(total_weight),
+                "server/outer_lr": self.outer_lr,
+                "client/avg_query_loss": avg_m["query_loss"],
+                "client/avg_grad_norm": avg_m["grad_norm"],
+                "client/avg_clip_coef": avg_m["clip_coef"],
+                "client/avg_inner_loss_init": avg_m["inner_loss_init"],
+                "client/avg_inner_loss_final": avg_m["inner_loss_final"],
+            },
+            step=global_round,
+        )
 
-        aggregated = {
-            "eval/mean_wer": float(np.mean(wers)),
-            "eval/mean_adaptation_gain": float(np.mean(gains)),
-            "eval/nodes_with_positive_gain": int(sum(1 for g in gains if g > 0)),
+        if (
+            self._checkpoint_dir is not None
+            and self._param_names is not None
+            and global_round % self._checkpoint_every == 0
+        ):
+            self._save_checkpoint(global_round)
+
+        updated_params = ndarrays_to_parameters(self._theta_star)
+        return updated_params, {"round": server_round}
+
+    def _save_checkpoint(self, server_round: int) -> None:
+        import torch
+        self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        path = self._checkpoint_dir / f"theta_star_lora_round_{server_round:04d}.pt"
+        state_dict = {
+            name: torch.tensor(arr.astype("float32"))
+            for name, arr in zip(self._param_names, self._theta_star)
         }
+        torch.save(state_dict, path)
+        print(f"  [server] Checkpoint saved: {path.name}", flush=True)
+        self._tracker.log_artifact(path)
 
-        if self.mlflow_run is not None:
-            import mlflow
-            mlflow.log_metrics(aggregated, step=server_round)
+    def configure_evaluate(self, server_round, parameters, client_manager):
+        """Evaluation handled externally by eval_poc.py."""
+        return []
 
-        return float(np.mean(wers)), aggregated
+    def aggregate_evaluate(self, server_round, results, failures):
+        return None, {}
 
-    def initialize_parameters(self, client_manager):
-        """
-        Return None so Flower requests initial parameters from a client.
-        The client's get_parameters() will return encoder weights,
-        which become self.current_params on the first aggregate_fit call.
-        """
+    def evaluate(self, server_round, parameters):
         return None
 
-    def on_fit_config_fn(self, server_round: int) -> Dict:
-        return {"server_round": server_round}
-
-    def on_evaluate_config_fn(self, server_round: int) -> Dict:
-        return {"server_round": server_round}
+    def close(self) -> None:
+        """End the MLflow run. Call after fl.server.start_server() returns."""
+        self._tracker.end()

@@ -1,46 +1,15 @@
-# Per-FedAvg MAML for Wav2Vec2 speech personalization
-# VoiceFL-MAML requirements
-#
-# Note: learn2learn is NOT listed — it fails to build on Python 3.13+
-# (missing longintrepr.h removed in CPython 3.12). FOMAML is implemented
-# natively in maml/engine.py using PyTorch autograd (create_graph=False).
-#
-# Note: opacus is NOT listed — incompatible with higher's functional model
-# wrapper (higher.innerloop_ctx). DP is implemented manually in
-# privacy/dp_meta.py via L2 clip + Gaussian noise.
-
-# MAML
-higher>=0.2.1
-
-# Privacy accounting (manual DP, no Opacus)
-autodp>=0.2
-
-# FL framework
-flwr[simulation]>=1.0.0
-
-# ASR model
-transformers>=4.30.0
-torch>=2.0.0
-torchaudio>=2.0.0
-
-# Data
-datasets>=2.0.0
-soundfile>=0.12.0
-librosa>=0.10.0
-
-# WER evaluation
-evaluate>=0.4.0
+torch>=2.1.0,<2.4.0
+torchaudio>=2.1.0,<2.4.0
+transformers>=4.37.0,<4.39.0
+datasets>=2.14.0,<3.0.0
+flwr>=1.2.0,<2.0.0
+numpy>=1.24.0,<2.0.0
+PyYAML>=6.0
 jiwer>=3.0.0
-
-# Experiment tracking
-mlflow>=2.0.0
-
-# Security (BAE)
-scikit-learn>=1.2.0
-
-# Config
-pyyaml>=6.0
-
-# Utilities
-numpy>=1.24.0
-tqdm>=4.65.0
+soundfile>=0.12.1
+librosa>=0.10.0
+grpcio>=1.59.0
+grpcio-tools>=1.59.0
+higher>=0.2.1
+mlflow>=3.0.0
+scipy>=1.11.0

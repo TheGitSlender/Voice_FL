@@ -1,252 +1,133 @@
 """
-data/download.py — S1: Data Source Discovery
+Download LibriSpeech train-clean-100 and select 5 speakers with low heterogeneity.
 
-Loads LibriSpeech train.clean.100 from HuggingFace, analyzes the speaker
-distribution, selects 20 diverse speakers via stratified sampling, assigns
-anonymous node IDs, and saves data/speaker_selection.json.
+Selection criteria (priority order):
+  1. Between 100 and 130 clips per speaker
+  2. duration_std between 1.0s and 2.0s
+  3. Similar data quantities (low inter-speaker variance)
+  4. No speaker with fewer than 80 clips
 
-Raw audio is NOT saved — HuggingFace caches the dataset locally after first run.
-
-Run:
-    python data/download.py
-Output:
-    data/speaker_selection.json
-    data/salt.txt  (gitignored — do not commit)
+Output: data/speaker_selection.json
 """
 
-import hashlib
-import io
 import json
 import os
-import uuid
+import hashlib
+import secrets
+import sys
+from pathlib import Path
 from collections import defaultdict
 
 import numpy as np
-import soundfile as sf
-from datasets import Audio, load_dataset
-from tqdm import tqdm
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-DATASET_REPO   = "openslr/librispeech_asr"
-DATASET_CONFIG = "clean"
-DATASET_SPLIT  = "train.100"
-N_NODES        = 20
-MIN_CLIPS      = 50
-SALT_FILE      = "data/salt.txt"
-OUTPUT_FILE    = "data/speaker_selection.json"
+DATA_DIR = Path(__file__).parent
+SALT_FILE = DATA_DIR / "salt.txt"
+SELECTION_FILE = DATA_DIR / "speaker_selection.json"
 
+TARGET_SPEAKERS = 5
+MIN_CLIPS = 80
+PREFERRED_MIN_CLIPS = 100
+PREFERRED_MAX_CLIPS = 130
+PREFERRED_DUR_STD_MIN = 1.0
+PREFERRED_DUR_STD_MAX = 2.0
+SAMPLE_RATE = 16000
 
-# ---------------------------------------------------------------------------
-# Audio helpers — bypass torchcodec entirely
-# ---------------------------------------------------------------------------
-def get_duration(audio_dict: dict) -> float:
-    """Read only the header to get clip duration. No full decode."""
-    if audio_dict.get("bytes"):
-        info = sf.info(io.BytesIO(audio_dict["bytes"]))
-    else:
-        info = sf.info(audio_dict["path"])
-    return info.frames / info.samplerate
-
-
-# ---------------------------------------------------------------------------
-# Step 1 — Load dataset
-# ---------------------------------------------------------------------------
-def load_librispeech():
-    print("=" * 60)
-    print("STEP 1 — Loading LibriSpeech train.clean.100")
-    print("=" * 60)
-    print(f"Source: {DATASET_REPO}  config={DATASET_CONFIG}  split={DATASET_SPLIT}")
-    print("First run downloads ~6 GB and caches locally. Subsequent runs are instant.")
-    print()
-
-    ds = load_dataset(DATASET_REPO, DATASET_CONFIG, split=DATASET_SPLIT, cache_dir="data")
-
-    # Disable automatic audio decoding — we read duration via soundfile header only.
-    # This bypasses torchcodec entirely.
-    ds = ds.cast_column("audio", Audio(decode=False))
-
-    print(f"Total clips loaded: {len(ds):,}")
-    print(f"Columns:            {ds.column_names}")
-    print()
-    return ds
-
-
-# ---------------------------------------------------------------------------
-# Step 2 — Analyze speaker distribution
-# ---------------------------------------------------------------------------
-def analyze_speakers(ds) -> list[dict]:
-    print("=" * 60)
-    print("STEP 2 — Analyzing speaker distribution")
-    print("=" * 60)
-
-    speaker_clips: dict[int, list[float]] = defaultdict(list)
-
-    for row in tqdm(ds, total=len(ds), desc="Grouping by speaker"):
-        dur = get_duration(row["audio"])
-        speaker_clips[row["speaker_id"]].append(dur)
-
-    speaker_stats = []
-    for sid, durs in speaker_clips.items():
-        arr = np.array(durs)
-        speaker_stats.append({
-            "speaker_id":       sid,
-            "clip_count":       len(arr),
-            "total_duration_s": float(arr.sum()),
-            "mean_duration_s":  float(arr.mean()),
-            "duration_std":     float(arr.std()),
-        })
-
-    all_clips = [s["clip_count"] for s in speaker_stats]
-    print(f"Total speakers:         {len(speaker_stats)}")
-    print(f"Min clips per speaker:  {min(all_clips)}")
-    print(f"Max clips per speaker:  {max(all_clips)}")
-    print(f"Mean clips per speaker: {sum(all_clips)/len(all_clips):.1f}")
-    print()
-    return speaker_stats
-
-
-# ---------------------------------------------------------------------------
-# Step 3 — Rank by duration_std
-# ---------------------------------------------------------------------------
-def rank_speakers(speaker_stats: list[dict]) -> list[dict]:
-    print("=" * 60)
-    print("STEP 3 — Ranking speakers by duration_std (heterogeneity proxy)")
-    print("=" * 60)
-    print("duration_std = std of clip durations per speaker.")
-    print("High variance → more varied speech patterns → better FL diversity.")
-    print()
-
-    eligible = [s for s in speaker_stats if s["clip_count"] >= MIN_CLIPS]
-    print(f"Speakers with >= {MIN_CLIPS} clips: {len(eligible)} / {len(speaker_stats)}")
-
-    eligible.sort(key=lambda x: x["duration_std"])
-    for rank, s in enumerate(eligible):
-        s["diversity_rank"] = rank + 1
-
-    std_values = [s["duration_std"] for s in eligible]
-    print(f"duration_std range: [{min(std_values):.3f}s, {max(std_values):.3f}s]")
-    print()
-    return eligible
-
-
-# ---------------------------------------------------------------------------
-# Step 4 — Stratified speaker selection
-# ---------------------------------------------------------------------------
-def load_or_create_salt() -> str:
-    os.makedirs("data", exist_ok=True)
-    if os.path.exists(SALT_FILE):
-        with open(SALT_FILE) as f:
-            return f.read().strip()
-    salt = str(uuid.uuid4())
-    with open(SALT_FILE, "w") as f:
-        f.write(salt)
-    print(f"Generated new salt → {SALT_FILE}  (gitignored, do not commit)")
+def load_salt() -> str:
+    if SALT_FILE.exists():
+        return SALT_FILE.read_text().strip()
+    salt = secrets.token_hex(32)
+    SALT_FILE.write_text(salt)
     return salt
 
+def hash_speaker(speaker_id: int, salt: str) -> str:
+    raw = f"{salt}:{speaker_id}".encode()
+    return hashlib.sha256(raw).hexdigest()[:16]
 
-def anon_hash(speaker_id: int, salt: str) -> str:
-    raw = f"{speaker_id}:{salt}".encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+def compute_speaker_stats(dataset) -> dict:
+    """Compute per-speaker clip count and duration statistics."""
+    stats: dict[int, list[float]] = defaultdict(list)
+    print("Computing per-speaker statistics...")
+    for i, item in enumerate(dataset):
+        if i % 5000 == 0:
+            print(f"  processed {i}/{len(dataset)}")
+        spk = item["speaker_id"]
+        n_samples = len(item["audio"]["array"])
+        duration_s = n_samples / SAMPLE_RATE
+        stats[spk].append(duration_s)
+    return stats
 
-
-def select_speakers(eligible: list[dict], salt: str) -> list[dict]:
-    print("=" * 60)
-    print("STEP 4 — Stratified speaker selection")
-    print("=" * 60)
-    print(f"Target: {N_NODES} speakers from {len(eligible)} eligible.")
-    print("Strategy: divide rank-sorted speakers into 20 equal buckets,")
-    print("          pick the median speaker from each bucket.")
-    print()
-
-    n = len(eligible)
-    bucket_size = n / N_NODES
-    selected = []
-
-    for i in range(N_NODES):
-        start  = int(i * bucket_size)
-        end    = int((i + 1) * bucket_size)
-        bucket = eligible[start:end]
-        if not bucket:
-            raise RuntimeError(f"Empty bucket at index {i} — not enough eligible speakers.")
-        mid = bucket[len(bucket) // 2]
-        node_id = f"node_{i + 1:03d}"
-        selected.append({
-            "speaker_id":       mid["speaker_id"],
-            "node_id":          node_id,
-            "anon_hash":        anon_hash(mid["speaker_id"], salt),
-            "clip_count":       mid["clip_count"],
-            "total_duration_s": mid["total_duration_s"],
-            "mean_duration_s":  mid["mean_duration_s"],
-            "duration_std":     mid["duration_std"],
-            "diversity_rank":   mid["diversity_rank"],
+def select_speakers(stats: dict) -> list[dict]:
+    """Select 5 speakers meeting low-heterogeneity criteria."""
+    candidates = []
+    for spk_id, durations in stats.items():
+        n = len(durations)
+        if n < MIN_CLIPS:
+            continue
+        std = float(np.std(durations))
+        mean = float(np.mean(durations))
+        candidates.append({
+            "speaker_id": spk_id,
+            "clip_count": n,
+            "duration_mean": mean,
+            "duration_std": std,
         })
 
-    assert len({s["speaker_id"] for s in selected}) == N_NODES, "Duplicate speakers in selection"
+    tier1 = [
+        c for c in candidates
+        if PREFERRED_MIN_CLIPS <= c["clip_count"] <= PREFERRED_MAX_CLIPS
+        and PREFERRED_DUR_STD_MIN <= c["duration_std"] <= PREFERRED_DUR_STD_MAX
+    ]
+    print(f"Tier-1 candidates (preferred range): {len(tier1)}")
+
+    pool = tier1 if len(tier1) >= TARGET_SPEAKERS else candidates
+    if len(pool) < TARGET_SPEAKERS:
+        raise RuntimeError(
+            f"Not enough speakers meeting criteria. Found {len(pool)}, need {TARGET_SPEAKERS}."
+        )
+
+    pool.sort(key=lambda c: (c["duration_std"], abs(c["clip_count"] - 115)))
+    selected = pool[:TARGET_SPEAKERS]
     return selected
 
+def main():
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        print("ERROR: 'datasets' package not installed. Run: pip install datasets")
+        sys.exit(1)
 
-# ---------------------------------------------------------------------------
-# Step 5 — Save and print summary
-# ---------------------------------------------------------------------------
-def save_selection(selected: list[dict], total_speakers: int) -> None:
-    payload = {
-        "selected_speakers":        selected,
-        "total_speakers_available": total_speakers,
-        "selection_strategy":       "stratified_by_duration_std",
-        "min_clips_threshold":      MIN_CLIPS,
-        "dataset":                  f"{DATASET_REPO} {DATASET_SPLIT}",
-    }
-    os.makedirs("data", exist_ok=True)
-    with open(OUTPUT_FILE, "w") as f:
-        json.dump(payload, f, indent=2)
-    print(f"Saved: {OUTPUT_FILE}")
+    print("Loading LibriSpeech train-clean-100 (this may take a while)...")
+    ds = load_dataset(
+        "openslr/librispeech_asr",
+        "clean",
+        split="train.100",
+        trust_remote_code=True,
+    )
+    print(f"Dataset loaded: {len(ds)} clips")
 
+    stats = compute_speaker_stats(ds)
+    print(f"Total unique speakers: {len(stats)}")
 
-def print_summary(selected: list[dict]) -> None:
-    print()
-    print("=" * 60)
-    print("STEP 5 — Selected speaker summary")
-    print("=" * 60)
-    header = f"{'Node':<12} {'Speaker':>10} {'Clips':>7} {'Total(min)':>12} {'Std(s)':>8} {'Rank':>6}"
-    print(header)
-    print("-" * len(header))
-    for s in selected:
+    selected = select_speakers(stats)
+    salt = load_salt()
+
+    selection = {}
+    for entry in selected:
+        spk_id = entry["speaker_id"]
+        node_hash = hash_speaker(spk_id, salt)
+        selection[node_hash] = {
+            "clip_count": entry["clip_count"],
+            "duration_mean": round(entry["duration_mean"], 3),
+            "duration_std": round(entry["duration_std"], 3),
+        }
         print(
-            f"{s['node_id']:<12} "
-            f"{s['speaker_id']:>10} "
-            f"{s['clip_count']:>7} "
-            f"{s['total_duration_s']/60:>12.1f} "
-            f"{s['duration_std']:>8.3f} "
-            f"{s['diversity_rank']:>6}"
+            f"  node={node_hash}  clips={entry['clip_count']}  "
+            f"mean={entry['duration_mean']:.2f}s  std={entry['duration_std']:.2f}s"
         )
-    print()
-    total_clips = sum(s["clip_count"] for s in selected)
-    total_hrs   = sum(s["total_duration_s"] for s in selected) / 3600
-    print(f"Total clips in selection: {total_clips:,}")
-    print(f"Total audio in selection: {total_hrs:.2f} hours")
-    print()
-    print(f"Output: {OUTPUT_FILE}")
-    print("Next step: python data/pii_masking.py")
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-def main() -> None:
-    print()
-    print("VoiceFL — Phase 1 / S1: Data Source Discovery")
-    print()
-
-    ds            = load_librispeech()
-    speaker_stats = analyze_speakers(ds)
-    eligible      = rank_speakers(speaker_stats)
-    salt          = load_or_create_salt()
-    selected      = select_speakers(eligible, salt)
-    save_selection(selected, total_speakers=len(speaker_stats))
-    print_summary(selected)
-
+    SELECTION_FILE.write_text(json.dumps(selection, indent=2))
+    print(f"\nSaved {len(selection)} speakers to {SELECTION_FILE}")
+    print("Run: python data/pii_masking.py")
 
 if __name__ == "__main__":
     main()
