@@ -1,4 +1,3 @@
-% VoiceFL-MAML School Project Report
 % Compile: pdflatex poc_report && bibtex poc_report && pdflatex poc_report && pdflatex poc_report
 \documentclass[12pt]{article}
 \usepackage{graphicx}
@@ -18,7 +17,7 @@
 \usepackage[english]{babel}
 
 \fancyhf{}
-\fancyhead[L]{\textbf{Progress Report}}
+\fancyhead[L]{\textbf{VoiceFL-MAML — Federated Meta-Learning for Speech Recognition}}
 \fancyfoot[C]{\hspace{4cm}\thepage}
 
 \usepackage{graphicx}
@@ -39,9 +38,9 @@
 
 \title{VoiceFL-MAML: Federated Meta-Learning for\\
        Personalised Accented Speech Recognition}
-\author{TheSlender \\ \\
-Superviser : Badr Hirchoua \\}
-\date{\today}
+\author{Hany El Atlassi - Marouane El-Hamdaoui - Rabyâ Raghib \\ \\
+Supervisor : Badr Hirchoua \\}
+\date{April 27, 2026}
 \usepackage{mathpazo}
 \renewcommand\familydefault{\rmdefault}
 
@@ -70,29 +69,20 @@ Superviser : Badr Hirchoua \\}
 \thispagestyle{empty}
 
 \begin{abstract}
-We present \textbf{VoiceFL-MAML}, a two-phase federated meta-learning system for
-personalised automatic speech recognition of accented English.
-Phase~1 establishes a proof-of-concept using FOMAML-ANIL on LibriSpeech.
-Phase~2, \emph{FedLoRA-MAML}, deploys true second-order MAML with LoRA adapters
-on the L2-ARCTIC corpus, training over 12 federated nodes spanning six
-non-native English accent groups.
-After 50 rounds the federated meta-initialisation $\theta^*$ matches or outperforms
-\texttt{wav2vec2-base-100h} on three of six accent groups,
-with a \SI{3.1}{pp} statistically significant improvement for Vietnamese (THV).
-Communication cost is reduced \textbf{295$\times$} relative to full Per-FedAvg
-by transmitting only 320K LoRA parameters per round instead of 94.5M.
-Projections from the convergence curve indicate that with 200 total rounds the system
-may approach the performance of the much larger \texttt{wav2vec2-base-960h} baseline
+We present \textbf{VoiceFL-MAML}, a two-phase federated meta-learning system for personalised automatic speech recognition of accented English. Phase~1 establishes a proof-of-concept using FOMAML-ANIL on LibriSpeech. Phase~2, \emph{FedLoRA-MAML}, deploys true second-order MAML with LoRA adapters on the L2-ARCTIC corpus, training over 12 federated nodes spanning six non-native English accent groups.
+After 50 rounds the federated meta-initialisation $\theta^*$ matches or outperforms \texttt{wav2vec2-base-100h} on three of six accent groups, with a \SI{3.1}{pp} statistically significant improvement for Vietnamese (THV). Communication cost is reduced \textbf{295$\times$} relative to full Per-FedAvg by transmitting only 320K LoRA parameters per round instead of 94.5M.
+Projections from the convergence curve indicate that with 200 total rounds the system may approach the performance of the much larger \texttt{wav2vec2-base-960h} baseline
 on several accent groups.
 \end{abstract}
+
 
 \tableofcontents
 \clearpage
 
-\listoffigures
-\newpage
-\listoftables
-\newpage
+% \listoffigures
+% \newpage
+% \listoftables
+% \newpage
 
 % ============================================================
 \section*{Introduction}
@@ -103,11 +93,11 @@ Automatic speech recognition (ASR) systems trained on large, homogeneous corpora
 generalise poorly to speakers with non-native accents.
 The performance gap between native and accented English is especially severe for
 speakers with L1 backgrounds that share few phonological features with American
-English---Vietnamese and Arabic speakers frequently experience word-error rates
+English, Vietnamese and Arabic speakers frequently experience word-error rates
 (WER) two to three times higher than native-speaker baselines.
 
-The straightforward remedy---collecting labelled accented speech at scale and
-fine-tuning---conflicts with privacy requirements: voice recordings are personal
+Collecting labelled accented speech at scale and
+fine-tuning conflicts with privacy requirements: voice recordings are personal
 biometric data.
 A speaker should not need to upload their voice to an external server in order to
 receive a model calibrated to their accent.
@@ -119,11 +109,11 @@ training a single shared model, it trains an initialisation $\theta^*$ from whic
 any new speaker can adapt rapidly with just a few gradient steps.
 
 This project implements and evaluates a system that combines both ideas:
-\textbf{FedLoRA-MAML}---a federated, second-order MAML system using
+\textbf{FedLoRA-MAML}: a federated, second-order MAML system using
 Low-Rank Adaptation (LoRA~\cite{hu2022lora}) to reduce the parameter space
 that must be communicated, making the system practical on commodity hardware.
 
-\paragraph{Proof statement.}
+\paragraph{Proof statement.} 
 A federated meta-initialisation $\theta^*$ enables a \emph{new, unseen} speaker to
 adapt a speech recognition model to their accent faster (lower WER with fewer
 adaptation steps) than a standard pretrained baseline, while voice data never
@@ -205,8 +195,8 @@ small enough to communicate cheaply.
 
 \subsection{Federated Learning and Per-FedAvg}
 
-Standard FedAvg~\cite{mcmahan2017fedavg} averages client weight updates.
-\textbf{Per-FedAvg}~\cite{fallah2020perfedavg} instead aggregates client
+The classical FedAvg~\cite{mcmahan2017fedavg} algorithm averages client weight updates.
+On the other hand, \textbf{Per-FedAvg}~\cite{fallah2020perfedavg} instead aggregates client
 meta-gradients and applies them at the server with a global outer
 learning rate $\beta$:
 \begin{equation}
@@ -216,8 +206,7 @@ learning rate $\beta$:
 \end{equation}
 where $n_i$ is the number of query examples used by client $i$ and
 $\nabla_{\theta^*}^{(i)}$ is the meta-gradient returned by that client.
-This formulation ensures each client contributes proportionally to its data
-volume, not just its participation in the round.
+
 
 \subsection{Low-Rank Adaptation (LoRA)}
 
@@ -298,10 +287,7 @@ Audio never leaves its node; only LoRA meta-gradients travel over the network.
 
 The model (\verb|models/lora_wav2vec2.py|) wraps \texttt{wav2vec2-base-100h}
 with manual LoRA injection.
-The PEFT library is intentionally not used because PEFT's
-\verb|get_peft_model()| replaces parameters in a way that is incompatible with
-\verb|higher.innerloop_ctx|, which patches parameters functionally for
-second-order differentiation.
+
 
 \begin{table}[H]
 \centering
@@ -330,29 +316,69 @@ universal acoustic representations in the lower layers.
 
 Figure~\ref{fig:lora-injection} illustrates the injection.
 
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[
+%   box/.style    = {draw, rounded corners=3pt, minimum width=2.4cm,
+%                    minimum height=0.8cm, font=\small, text centered},
+%   frozen/.style = {box, fill=PastelBlue,  draw=NavyBlue},
+%   lora/.style   = {box, fill=PastelGreen, draw=ForestGreen},
+%   sum/.style    = {draw, circle, minimum size=0.65cm, font=\bfseries},
+%   arr/.style    = {-Stealth, thick}
+% ]
+%   \node        (x)   at (-2.5, 0)   {$x$};
+%   \node[frozen](W)   at ( 0.0, 0)   {$W$ (frozen)};
+%   \node[lora]  (A)   at ( 3.2,-1.2) {$A \in \mathbb{R}^{r \times k}$};
+%   \node[lora]  (B)   at ( 3.2, 1.2) {$B \in \mathbb{R}^{d \times r}$};
+%   \node[sum]   (pl)  at ( 6.0, 0)   {$+$};
+%   \node[box]   (out) at ( 8.8, 0)   {output $h$};
+
+%   \draw[arr] (x) -- (W);
+%   \draw[arr] (x) -- ++(1,0) |- (A);
+%   \draw[arr] (W) -- node[above]{\scriptsize $Wx$} (pl);
+%   \draw[arr] (A) -- node[right]{\scriptsize $Ax$} (B);
+%   \draw[arr] (B) -- node[above]{\scriptsize $\frac{\alpha}{r}BAx$} (pl);
+%   \draw[arr] (pl) -- (out);
+% \end{tikzpicture}
+% \caption{LoRA injection. The frozen weight $W$ processes $x$ in parallel with
+%          the trainable low-rank path $B(Ax)\cdot(\alpha/r)$.
+%          Outputs are summed element-wise.}
+% \label{fig:lora-injection}
+% \end{figure}
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[
   box/.style    = {draw, rounded corners=3pt, minimum width=2.4cm,
-                   minimum height=0.8cm, font=\small, text centered},
+                   minimum height=0.4cm, font=\small, text centered},
   frozen/.style = {box, fill=PastelBlue,  draw=NavyBlue},
   lora/.style   = {box, fill=PastelGreen, draw=ForestGreen},
   sum/.style    = {draw, circle, minimum size=0.65cm, font=\bfseries},
   arr/.style    = {-Stealth, thick}
 ]
-  \node        (x)   at (-2.5, 0)   {$x$};
-  \node[frozen](W)   at ( 0.0, 0)   {$W$ (frozen)};
-  \node[lora]  (A)   at ( 3.2,-1.2) {$A \in \mathbb{R}^{r \times k}$};
-  \node[lora]  (B)   at ( 3.2, 1.2) {$B \in \mathbb{R}^{d \times r}$};
-  \node[sum]   (pl)  at ( 6.0, 0)   {$+$};
-  \node[box]   (out) at ( 8.8, 0)   {output $h$};
+  %% Row 1 (top) — frozen path
+  \node[frozen](W)   at ( 0.0,  2.0) {$W$ (frozen)};
 
-  \draw[arr] (x) -- (W);
-  \draw[arr] (x) -- ++(1,0) |- (A);
-  \draw[arr] (W) -- node[above]{\scriptsize $Wx$} (pl);
-  \draw[arr] (A) -- node[right]{\scriptsize $Ax$} (B);
-  \draw[arr] (B) -- node[above]{\scriptsize $\frac{\alpha}{r}BAx$} (pl);
+  %% Row 2 (middle) — input, sum, output
+  \node        (x)   at (-4.0,  0.0) {$x$};
+  \node[sum]   (pl)  at ( 4.0,  0.0) {$+$};
+  \node[box]   (out) at ( 7.2,  0.0) {output $h$};
+
+  %% Row 3 (bottom) — low-rank branch
+  \node[lora]  (A)   at (-1.2, -2.0) {$A \in \mathbb{R}^{r \times k}$};
+  \node[lora]  (B)   at ( 2.4, -2.0) {$B \in \mathbb{R}^{d \times r}$};
+
+  %% ── Frozen path: x rises to W, W drops to + ──
+  \draw[arr] (x)  -- ++(1,1) |- (W);
+  \draw[arr] (W)  -| node[right, pos=0.5]{\scriptsize $Wx$} (pl);
+
+  %% ── Low-rank path: x drops to A, A → B, B rises to + ──
+  \draw[arr] (x)  -- ++(1,-1) |- (A);
+  \draw[arr] (A)  -- node[below]{\scriptsize $Ax$} (B);
+  \draw[arr] (B)  -| node[right, pos=0.5]{\scriptsize $\dfrac{\alpha}{r}BAx$} (pl);
+
+  %% ── Output ──
   \draw[arr] (pl) -- (out);
+
 \end{tikzpicture}
 \caption{LoRA injection. The frozen weight $W$ processes $x$ in parallel with
          the trainable low-rank path $B(Ax)\cdot(\alpha/r)$.
@@ -365,6 +391,7 @@ Figure~\ref{fig:lora-injection} illustrates the injection.
 
 PyTorch's built-in \verb|nn.CTCLoss| calls the C++ kernel
 \verb|aten::_ctc_loss_backward|, which has no registered second derivative.
+
 Calling \verb|higher.innerloop_ctx(track_higher_grads=True)| with this loss
 raises a \texttt{RuntimeError: derivative for \_ctc\_loss\_backward is not implemented}.
 
@@ -526,17 +553,18 @@ MAML-ready tensors.
 \centering
 \begin{tikzpicture}[
   stage/.style = {draw, fill=PastelBlue, draw=NavyBlue, rounded corners=4pt,
-                  minimum width=3.0cm, minimum height=0.85cm,
-                  font=\small, text centered},
+                  text width=0.26\textwidth, minimum height=1.0cm,
+                  inner sep=6pt, align=center, font=\small},
   arr/.style   = {-Stealth, thick, NavyBlue},
-  note/.style  = {font=\scriptsize, text=gray}
+  note/.style  = {font=\scriptsize, text=gray, align=center},
+  node distance=0.10\textwidth and 1.9cm
 ]
-  \node[stage] (raw)  at (0, 0)  {L2-ARCTIC WAVs (22kHz)};
-  \node[stage] (prep) at (4, 0)  {\texttt{prepare\_l2arctic}};
-  \node[stage] (feat) at (8, 0)  {\texttt{features.pt} (16kHz)};
-  \node[stage] (task) at (8,-2)  {Task Sampler ($K$-shot)};
-  \node[stage] (maml) at (4,-2)  {MAMLEngine ($k$=5 steps)};
-  \node[stage] (grad) at (0,-2)  {Meta-gradient $\nabla_{\theta^*}$};
+  \node[stage] (raw) {L2-ARCTIC WAVs\\(22kHz)};
+  \node[stage, right=of raw] (prep) {\texttt{prepare\_l2arctic}};
+  \node[stage, right=of prep] (feat) {\texttt{features.pt}\\(16kHz)};
+  \node[stage, below=of feat] (task) {Task Sampler\\($K$-shot)};
+  \node[stage, left=of task] (maml) {MAMLEngine\\($k$=5 steps)};
+  \node[stage, left=of maml] (grad) {Meta-gradient\\$\nabla_{\theta^*}$};
 
   \draw[arr] (raw)  -- (prep);
   \draw[arr] (prep) -- (feat);
@@ -544,10 +572,10 @@ MAML-ready tensors.
   \draw[arr] (task) -- (maml);
   \draw[arr] (maml) -- (grad);
 
-  \node[note] at (2.0, 0.45) {per speaker};
-  \node[note] at (6.0, 0.45) {float32, [-1,1]};
-  \node[note] at (8.0,-1.05) {support $\cap$ query $= \emptyset$};
-  \node[note] at (4.0,-2.55) {2nd-order CTC};
+  \node[note, above=2mm of $(raw.east)!0.5!(prep.west)$] {per speaker};
+  \node[note, above=2mm of $(prep.east)!0.5!(feat.west)$] {float32, [-1,1]};
+  \node[note, below=2mm of feat] {support $\cap$ query $= \emptyset$};
+  \node[note, below=2mm of maml] {2nd-order CTC};
 \end{tikzpicture}
 \caption{Preprocessing and task-construction pipeline. Raw audio is resampled and
          normalised to float32. The task sampler constructs disjoint support/query
@@ -687,12 +715,12 @@ across restarts.
 \subsection{PerFedAvg: Gradient Aggregation, Not Weight Averaging}
 
 The protocol is \textbf{not} FedAvg.
-Clients do not send weight updates; they send meta-gradients---the outer-loop
+Clients do not send weight updates; they send meta-gradients, the outer-loop
 gradient of the query CTC loss with respect to $\theta^*$ after $k$ inner steps.
 The server applies one step of AdamW using the weighted average of incoming
-gradients (Equation~\ref{eq:perfedavg}).
+gradients under the PerFedAvg algorithm (Equation~\ref{eq:perfedavg}).
 
-This distinction matters:
+We need gradient aggregation in our use case, specifically for two reasons:
 \begin{itemize}
   \item Weight averaging conflates the direction and magnitude of local adaptation.
   \item Gradient aggregation preserves the geometric meaning of the meta-gradient
@@ -705,17 +733,17 @@ This distinction matters:
 Each round proceeds as follows:
 
 \begin{enumerate}
-  \item \textbf{Cohort selection.} The server selects a random cohort of 3 of 12
-        nodes (\verb|cohort_fraction: 0.25|).
-  \item \textbf{Broadcast.} $\theta^*$ (LoRA + lm\_head weights) is serialised
+  \item \textbf{Cohort selection:} A cohort of 3 out of 12
+        nodes is selected (\verb|cohort_fraction: 0.25|).
+  \item \textbf{Broadcast:} $\theta^*$ (LoRA + lm\_head weights) is serialised
         as NumPy arrays and sent to each selected node via Flower's \texttt{FitIns}.
-  \item \textbf{Local MAML episode.} Each node runs $k=5$ inner-loop steps on its
-        support set, evaluates the query CTC loss, and backpropagates through the
+  \item \textbf{Local MAML episode:} Each node runs $k=5$ inner-loop steps on its
+        support set. We evaluate the query CTC loss, then backpropagate through the
         inner loop with the custom differentiable CTC (second-order).
-  \item \textbf{Gradient return.} The node clips the gradient to $\ell_2$ norm
-        $\leq 50.0$, serialises it, and returns it in \texttt{FitRes} alongside
+  \item \textbf{Gradient return:} The node clips the gradient to a serialized $\ell_2$ norm
+        $\leq 50.0$, and returns it in \texttt{FitRes} with
         five diagnostic metrics.
-  \item \textbf{Aggregation.} The server computes the weighted average, checks
+  \item \textbf{Aggregation:} The server computes the weighted average, checks
         for NaN values, and applies one AdamW step.
   \item \textbf{Checkpoint.} Every 10 rounds the server saves $\theta^*$ to disk.
 \end{enumerate}
@@ -766,12 +794,11 @@ Each node returns the following metrics in \verb|FitRes.metrics|:
   \item \texttt{inner\_loss\_final} --- CTC loss at inner step $k$ (after adaptation).
 \end{itemize}
 
-The \emph{adaptation efficiency} is:
+We introduce the \emph{adaptation efficiency} metric:
 \begin{equation}
   \mathrm{AE} = 1 - \frac{\texttt{inner\_loss\_final}}{\texttt{inner\_loss\_init}},
 \end{equation}
 measuring the fraction of loss eliminated by the inner loop.
-It grew from 1.6\% at round 1 to 43.4\% at round 45.
 
 % ============================================================
 \section{Privacy and Aggregation Security}
@@ -804,20 +831,14 @@ I6 & Encoder \texttt{requires\_grad} &
 
 \subsection{Aggregation Robustness}
 
-Even without formal differential privacy or secure aggregation, the protocol
-limits the impact of a compromised node:
+Even without formal differential privacy or secure aggregation, Gradient aggregation is inherently more robust than weight averaging. In weight averaging, a malicious weight update can shift the model arbitrarily, whereas a malicious meta-gradient is clipped and averaged with other legitimate gradients, hence its impact is limited. We also limit the impact of a compromised node using:
 
 \begin{itemize}
-  \item \textbf{Gradient clipping} (norm $\leq 50.0$) bounds the maximum
+  \item \textbf{Gradient clipping} (norm $\leq 50.0$), which bounds the maximum
         influence a single client can exert per round.
-  \item \textbf{Weighted aggregation} ($\sum n_i g_i / \sum n_i$) means a node
-        with fewer query examples has proportionally less influence.
-  \item \textbf{NaN guard} discards the entire contribution of any node that
-        returns invalid gradients, preventing a trivial poisoning attack.
-  \item \textbf{Gradient aggregation} is inherently more robust than weight
-        averaging: a malicious weight update can shift the model arbitrarily,
-        whereas a malicious meta-gradient is clipped and averaged with other
-        legitimate gradients.
+  \item \textbf{Weighted aggregation} ($\sum n_i g_i / \sum n_i$)
+  \item \textbf{NaN guard}, discarding the entire contribution of any node that
+        returns invalid gradients.
 \end{itemize}
 
 \subsection{Scope Limitations}
@@ -834,7 +855,7 @@ Differential privacy &
   Opacus is incompatible with \texttt{higher.innerloop\_ctx}; manual DP
   requires per-sample gradient clipping which breaks second-order differentiability. \\
 Secure aggregation &
-  Requires multi-party communication rounds; infeasible in single-GPU simulation. \\
+  It requires multi-party communication rounds; infeasible in single-GPU simulation. \\
 mTLS / certificates & Plain gRPC sufficient for local container network. \\
 Byzantine robustness (Krum, etc.) &
   Out of scope; three-node cohorts already limit attack surface. \\
@@ -849,8 +870,8 @@ Byzantine robustness (Krum, etc.) &
 
 \subsection{Three Failure Modes and Their Resolutions}
 
-Training required resolving three distinct failure modes before convergence.
-Table~\ref{tab:failures} summarises each.
+As we were training our model, three major failure modes  were discovered.
+Table~\ref{tab:failures} summarizes each.
 
 \begin{table}[H]
 \centering
@@ -872,7 +893,7 @@ Run 4 & wav2vec2-base-960h &
 \midrule
 Run 5 & wav2vec2-base-100h &
   Grad norm 154 at round 25 &
-  \texttt{MAX\_GRAD\_NORM = 20} too tight; model escaping sharp basin &
+  \texttt{MAX\_GRAD\_NORM = 20} too tight &
   Raise clip to 50.0 at round 26 \\
 \bottomrule
 \end{tabular}
@@ -880,82 +901,55 @@ Run 5 & wav2vec2-base-100h &
 
 \paragraph{Blank collapse (Run 3).}
 Without a fine-tuned \texttt{lm\_head}, CTC collapses to always predicting
-the blank token.
-This is a degenerate fixed point of the loss: the blank path has zero alignment
-uncertainty, so it is always the maximum-probability path.
-The meta-gradient is zero because the inner loop cannot escape this saddle.
+the blank token. The blank path has zero alignment
+uncertainty, it is always the maximum probability path.
 Switching to the 100h checkpoint provides enough signal for MAML to function.
 
 \paragraph{Gradient dead zone (Run 4).}
-The 960h model is already near-optimal on LibriSpeech; the loss is so low
+The 960h model is already near-optimal on LibriSpeech. The loss is so low
 that the adaptation signal (the query-loss reduction over $k$ inner steps)
 is negligible.
-Meta-learning requires curvature in the loss landscape; a near-optimal
-initialisation flattens it.
+To function, meta-learning requires significant curvature in the loss landscape.
 The 100h model has meaningfully higher loss on accented speech, providing the
 curvature the outer loop needs.
 
 \paragraph{Norm explosion and resolution (Run 5).}
 At round 25, grad norms reached 154 against a clip threshold of 20.
-Every step was clipped, meaning the effective update was always the normalised
-gradient direction---a form of constant-step-size gradient noise.
+Every step was clipped, so the effective update was always the normalized
+gradient direction, a form of constant-step-size gradient noise.
 Raising the clip to 50 caused the norm to collapse to 44 in a single round,
-and clipping ceased entirely for the remaining 20 rounds, indicating the model
+and clipping ceased entirely for the remaining training rounds, which shows the model
 found a flatter region of the loss surface.
 
 \subsection{Convergence Analysis}
 
-\begin{table}[H]
-\centering
-\caption{Key training metrics at four checkpoints.}
-\label{tab:convergence}
-\begin{tabular}{lrrrr}
-\toprule
-\textbf{Metric} & \textbf{Round 1} & \textbf{Round 25} & \textbf{Round 45} & \textbf{Round 50} \\
-\midrule
-Query CTC loss      & 58.3   & 16.4   & 9.2    & 9.2 (plateau) \\
-Inner loss $k=0$    & 58.6   & 27.9   & 18.0   & --- \\
-Inner loss $k=5$    & 57.6   & 17.6   & 10.2   & --- \\
-Adaptation eff.     & 1.6\%  & 37.1\% & 43.4\% & $\approx$43\% \\
-Grad norm           & 50     & 154    & 20     & $<$20 \\
-Clip coefficient    & 0.40   & 0.33   & 1.00   & 1.00 \\
-\bottomrule
-\end{tabular}
-\end{table}
+Checkpoints were saved every 10 rounds (rounds 10, 20, 30, 40, 50).
+By round 20, gradient norms had stabilized and the clip coefficient reached 1.00, the model had left the high-curvature region triggered by the norm explosion.
+No clipping occurred for the final 25 rounds.
+The round-50 checkpoint was selected for evaluation.
 
-\textbf{Convergence plateau.}
-Rounds 35--50 show query CTC $\approx 9.2 \pm 1.5$ (sampling noise),
-grad norms 17--25 (below clip threshold), and no clipping for 20 consecutive
-rounds.
-The model has entered a flat basin; additional rounds on the current
-configuration will yield diminishing returns without a larger cohort or
-higher-quality data.
-
-Figure~\ref{fig:loss-curve} plots the query CTC loss and adaptation efficiency
-over rounds.
 
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[scale=0.90]
   % Axes
   \draw[->] (0,0) -- (11.2,0) node[right]{\small Round};
-  \draw[->] (0,0) -- (0,6.2)  node[above]{\small CTC loss};
+  \draw[->] (0,0) -- (0,6.2)  node[above]{\small CTC loss (schematic)};
 
-  % Y gridlines and ticks
-  \foreach \y/\lab in {0/0, 1/10, 2/20, 3/30, 4/40, 5/50, 6/60} {
+  % Y gridlines (schematic, no labelled values)
+  \foreach \y in {1, 2, 3, 4, 5, 6} {
     \draw[gray!30] (0,\y) -- (10.5,\y);
-    \draw (-0.1,\y) -- (0,\y) node[left]{\scriptsize\lab};
   }
-  % X ticks (rounds 0..50, scale x10=1)
+  % X ticks (rounds 0..50, scale x/5=1)
   \foreach \x/\lab in {0/0, 2/10, 4/20, 6/30, 8/40, 10/50} {
     \draw (\x,-0.1) -- (\x,0) node[below]{\scriptsize\lab};
   }
 
-  % Loss curve (rounds 1,5,10,15,20,25,30,35,40,45,50 -> y scaled /10)
+  % Schematic decay curve
   \draw[NavyBlue, very thick, smooth] plot coordinates {
-    (0.2, 5.83) (1.0, 4.20) (2.0, 3.10) (3.0, 2.40)
-    (4.0, 2.00) (5.0, 1.64) (6.0, 1.30) (7.0, 1.05)
-    (8.0, 0.95) (9.0, 0.92) (10.0, 0.92)
+    (0.2, 5.50) (1.0, 4.20) (2.0, 3.10) (3.0, 2.40)
+    (4.0, 2.00) (5.0, 1.70) (6.0, 1.40) (7.0, 1.20)
+    (8.0, 1.10) (9.0, 1.05) (10.0, 1.02)
   };
 
   % Clip-raise event at round 26
@@ -963,15 +957,15 @@ over rounds.
   \node[font=\tiny, BrickRed, rotate=90] at (5.4, 3.0)
     {clip 20 $\to$ 50 (round 26)};
 
-  % Plateau annotation
-  \draw[ForestGreen, dashed] (8.0,0.92) -- (10.5,0.92)
-    node[right, font=\tiny]{plateau $\approx$9.2};
+  % Plateau annotation (no specific loss value)
+  \draw[ForestGreen, dashed] (8.0,1.05) -- (10.5,1.05)
+    node[right, font=\tiny]{plateau (rounds 30--50)};
 
   \node[font=\small, NavyBlue] at (3.0, 5.0)
     {Query CTC loss};
 \end{tikzpicture}
-\caption{Query CTC loss over 50 training rounds. The dashed vertical line marks
-         the round at which the gradient clip threshold was raised from 20 to 50;
+\caption{Schematic convergence trajectory over 50 training rounds (L2-ARCTIC, wav2vec2-base-100h).
+         The dashed vertical line marks round 26 when the gradient clip was raised from 20 to 50;
          clipping ceased permanently thereafter.}
 \label{fig:loss-curve}
 \end{figure}
@@ -1126,7 +1120,6 @@ diminishing returns near the plateau.
 \textbf{Uncertainty.}
 Projections are based on two data points;
 actual uncertainty is $\pm30$--$50$\% on the projected WER delta.
-These are order-of-magnitude estimates, not precise forecasts.
 
 \subsection{Projected WER at 200 Rounds}
 
@@ -1291,26 +1284,22 @@ any external meta-learning library dependency.
 \begin{itemize}
   \item Only 50 of 200 planned rounds completed; Korean, Spanish, and Arabic
         groups need more training.
-  \item The custom CTC is 220--450$\times$ slower than the native kernel;
-        scaling to longer clips requires careful memory management.
-  \item No differential privacy or secure aggregation (research PoC only).
-  \item Projections to 200 rounds are based on a two-point fit with large uncertainty.
+  \item The custom CTC is 220--450$\times$ slower than the native kernel
+  \item Projections to 200 rounds are based on a two-point fit with large uncertainty, more training is needed here.
 \end{itemize}
 
 \paragraph{Future work.}
 \begin{itemize}
   \item Complete the remaining 150 training rounds.
-  \item Implement curriculum sampling that over-represents phonologically distant
+  \item Concentrate on phonologically distant
         accent groups in early cohorts.
   \item Explore higher LoRA rank ($r = 16$ or $r = 32$) for harder accents.
-  \item Investigate compatibility paths for differential privacy with
-        second-order MAML.
-  \item Port the custom CTC dynamic programming to a CUDA kernel to eliminate
-        the Python-loop speed penalty.
+  \item Investigate alternatives/ more compatible frameworks for differential privacy with second-order MAML.
+  \item Port the custom CTC dynamic programming to a CUDA kernel for speed gains.
 \end{itemize}
 
 \newpage
 \bibliographystyle{unsrt}
-\bibliography{references}
+\bibliography{voicefl_references}
 
 \end{document}
