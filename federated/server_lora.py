@@ -148,7 +148,9 @@ def main():
     gc.collect()
 
     from maml import _load_yaml
-    maml_cfg = _load_yaml(args.config).get("maml", {}) if args.config else {}
+    raw_cfg = _load_yaml(args.config) if args.config else {}
+    maml_cfg = raw_cfg.get("maml", {})
+    agg_cfg = raw_cfg.get("aggregation", {})
 
     strategy = PerFedAvgStrategy(
         initial_parameters=initial_params,
@@ -163,6 +165,12 @@ def main():
         weight_decay=maml_cfg.get("outer_weight_decay", 1e-4),
         total_rounds=cfg["rounds"],
         warmup_rounds=maml_cfg.get("lr_warmup_rounds", 20),
+        robust_method=agg_cfg.get("robust_method", "mean"),
+        trim_ratio=agg_cfg.get("trim_ratio", 0.1),
+        n_byzantine=agg_cfg.get("n_byzantine", 1),
+        norm_filter_multiplier=agg_cfg.get("norm_filter_multiplier", 2.0),
+        secure_agg=bool(agg_cfg.get("secure_agg", False)),
+        secagg_mask_scale=agg_cfg.get("secagg_mask_scale", 0.01),
     )
 
     cohort_size = max(1, int(cfg["fraction_fit"] * cfg["min_available_clients"]))

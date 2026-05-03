@@ -42,3 +42,11 @@ hardware:
 
 logging:
   experiment_name: fedlora_maml_l2arctic
+
+aggregation:
+  robust_method: mean          # mean | trimmed_mean | coordinate_median | krum | norm_filter
+  trim_ratio: 0.10             # For trimmed_mean: fraction dropped from each tail (N > 2f)
+  n_byzantine: 1               # For krum: assumed max Byzantine clients (N >= 2f+2)
+  norm_filter_multiplier: 2.0  # For norm_filter: drop if norm > median_norm * this
+  secure_agg: false            # Pairwise-mask SecAgg (see federated/secure_agg.py)
+  secagg_mask_scale: 0.01      # Std of additive mask noise

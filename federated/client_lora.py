@@ -207,6 +207,23 @@ class MAMLClientLora(fl.client.Client):
 
         self._move_to_cpu()
 
+        if int(ins.config.get("secagg_enabled", 0)):
+            from federated.secure_agg import SecureAggregator
+            grad_arrays = SecureAggregator.apply_masks(
+                grad_arrays,
+                round_num=int(ins.config["secagg_round_num"]),
+                client_idx=int(ins.config["secagg_client_idx"]),
+                cohort_size=int(ins.config["secagg_cohort_size"]),
+                round_seed=int(ins.config["secagg_round_seed"]),
+                mask_scale=float(ins.config.get("secagg_mask_scale", 0.01)),
+            )
+            print(
+                f"{self._tag} round={server_round} SecAgg masks applied "
+                f"(client_idx={ins.config['secagg_client_idx']}, "
+                f"cohort={ins.config['secagg_cohort_size']})",
+                flush=True,
+            )
+
         return FitRes(
             status=Status(code=Code.OK, message=""),
             parameters=ndarrays_to_parameters(grad_arrays),

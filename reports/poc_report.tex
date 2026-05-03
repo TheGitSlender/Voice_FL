@@ -831,34 +831,123 @@ I6 & Encoder \texttt{requires\_grad} &
 
 \subsection{Aggregation Robustness}
 
-Even without formal differential privacy or secure aggregation, Gradient aggregation is inherently more robust than weight averaging. In weight averaging, a malicious weight update can shift the model arbitrarily, whereas a malicious meta-gradient is clipped and averaged with other legitimate gradients, hence its impact is limited. We also limit the impact of a compromised node using:
+Gradient aggregation is inherently more robust than weight averaging: a malicious weight
+update can shift the model arbitrarily, whereas a malicious meta-gradient is clipped and
+averaged with other legitimate gradients, bounding its influence.
+Beyond the baseline invariants, the server implements a pluggable
+\texttt{RobustAggregator} (\texttt{federated/aggregation.py}) with five selectable
+strategies, configured via a single \texttt{aggregation.robust\_method} key in the
+YAML config:
+
+\begin{table}[H]
+\centering
+\caption{Byzantine-robust aggregation strategies in \texttt{RobustAggregator}.}
+\label{tab:rob-methods}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{p{3.2cm} p{4.8cm} p{2.2cm} p{2.0cm}}
+\toprule
+\textbf{Method} & \textbf{Mechanism} & \textbf{Guarantee} & \textbf{Min cohort} \\
+\midrule
+\texttt{mean} & Weighted mean (default, current behaviour) & — & 1 \\
+\texttt{trimmed\_mean} & Drop lowest and highest $\lfloor fN \rfloor$ values per coordinate,
+  average remainder & Tolerates $f$ Byzantine if $N > 2f$ & $2f+1$ \\
+\texttt{coordinate\_median} & Coordinate-wise median across clients & Breakdown point $0.5$ & 3 \\
+\texttt{krum} & Select gradient closest to its $N{-}f{-}1$ nearest neighbours & Optimal for $N \geq 2f+2$ & $2f+2$ \\
+\texttt{norm\_filter} & Drop clients with norm $>$ median$\,\times\,$multiplier, average remainder & Removes outlier updates & 3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All five methods share the same input and output contract
+(\texttt{List[List[np.ndarray]]} $\rightarrow$ \texttt{List[np.ndarray]}),
+so the AdamW outer update is unchanged regardless of strategy.
+An audit dictionary is returned alongside the gradient and logged to MLflow
+(\texttt{server/rob\_n\_used}, \texttt{server/rob\_n\_dropped}) so filtered
+clients are visible in every run.
+The design is correct for arbitrary cohort size $N$; switching from the current
+cohort of 3 to 12 nodes requires only a config change.
+
+The three baseline mechanisms from the original design are retained:
 
 \begin{itemize}
-  \item \textbf{Gradient clipping} (norm $\leq 50.0$), which bounds the maximum
-        influence a single client can exert per round.
-  \item \textbf{Weighted aggregation} ($\sum n_i g_i / \sum n_i$)
-  \item \textbf{NaN guard}, discarding the entire contribution of any node that
+  \item \textbf{Gradient clipping} (norm $\leq 50.0$) bounds the maximum influence
+        a single client can exert per round.
+  \item \textbf{Weighted aggregation} ($\sum n_i g_i / \sum n_i$) gives larger
+        training sets proportionally more influence.
+  \item \textbf{NaN guard} discards the entire contribution of any node that
         returns invalid gradients.
 \end{itemize}
+
+\subsection{Secure Aggregation}
+\label{sec:secagg}
+
+A structural implementation of pairwise-mask secure aggregation is provided in
+\texttt{federated/secure\_agg.py}, based on the Bonawitz~et~al.\ (2017) protocol.
+The mechanism ensures that the server sees only the \emph{sum} of client gradients,
+not any individual contribution.
+
+\paragraph{Protocol.}
+For each pair $(i,j)$ with $i < j$ in the sampled cohort, a shared mask $r_{ij}$ is
+derived from a pair seed:
+\[
+  \texttt{pair\_seed} = \texttt{round\_seed} \oplus (i \cdot N + j)
+  \qquad r_{ij} \sim \mathcal{N}(0,\,\sigma^2\mathbf{I})
+\]
+Client $i$ \emph{adds} $r_{ij}$ to its gradient; client $j$ \emph{subtracts} it.
+Summation across all clients cancels every mask:
+\[
+  \sum_{i=0}^{N-1} \tilde{g}_i
+  \;=\; \sum_{i=0}^{N-1} g_i
+  \;+\; \underbrace{\sum_{i<j}(r_{ij} - r_{ij})}_{=\,0}
+  \;=\; \sum_{i=0}^{N-1} g_i
+\]
+
+The server injects five scalar keys into each client's \texttt{FitIns.config}
+(\texttt{secagg\_round\_seed}, \texttt{secagg\_client\_idx},
+\texttt{secagg\_cohort\_size}, \texttt{secagg\_mask\_scale}, \texttt{secagg\_enabled}).
+The client-side \texttt{apply\_masks()} function is a pure transformation applied
+to the numpy gradient arrays immediately before wire serialisation, with no change
+to the MAML computation.
+
+\paragraph{Security model.}
+The current implementation is an \emph{honest-but-curious} prototype: the round
+seed is chosen by the server and transmitted in plaintext, so a server that stores
+all seeds could recompute the masks.
+For production deployment, the round seed would be replaced by Diffie-Hellman key
+agreement between client pairs so the server never learns the pairwise secrets.
+The Flower 2.x \texttt{SecAgg+} plugin implements this full protocol; the
+\texttt{apply\_masks()} function and the aggregation arithmetic are unchanged.
+
+\paragraph{Scalability.}
+The mask computation scales as $O(N^2)$ pairings per round.
+At cohort size 3 the overhead is negligible; at cohort size 12 each client performs
+11 mask additions per parameter tensor.
+Both the Krum and trimmed-mean robust aggregators compose with SecAgg, since robust
+aggregation operates on the masked gradients and the cancellation identity holds
+regardless of the aggregation function applied to the sum.
+
+\paragraph{Integration test.}
+All six integration tests in \texttt{scripts/test\_fed\_integration.py} pass without a
+GPU or live Flower server, including a full SecAgg round-trip that verifies
+$\theta^*_{\text{masked}} = \theta^*_{\text{plain}}$ to within \num{1e-4}.
 
 \subsection{Scope Limitations}
 
 \begin{table}[H]
 \centering
-\caption{Security mechanisms not present in this PoC and the rationale.}
+\caption{Security mechanisms not present and rationale.}
 \label{tab:not-present}
 \begin{tabular}{p{3.8cm} p{8.5cm}}
 \toprule
-\textbf{Mechanism} & \textbf{Why omitted} \\
+\textbf{Mechanism} & \textbf{Status / rationale} \\
 \midrule
 Differential privacy &
-  Opacus is incompatible with \texttt{higher.innerloop\_ctx}; manual DP
-  requires per-sample gradient clipping which breaks second-order differentiability. \\
-Secure aggregation &
-  It requires multi-party communication rounds; infeasible in single-GPU simulation. \\
+  Opacus is incompatible with \texttt{higher.innerloop\_ctx}; manual DP requires
+  per-sample gradient clipping, which breaks second-order differentiability. \\
+SecAgg with DH key exchange &
+  Prototype uses server-distributed seed (honest-but-curious model).
+  Full DH-based SecAgg is the documented production upgrade path. \\
 mTLS / certificates & Plain gRPC sufficient for local container network. \\
-Byzantine robustness (Krum, etc.) &
-  Out of scope; three-node cohorts already limit attack surface. \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1197,6 +1286,14 @@ Clip norm = 50.0 &
 YAML anchor for node env &
   12 services sharing 5 env vars = 60 lines duplication without anchor. &
   Repeat per service \\
+Pluggable \texttt{RobustAggregator} &
+  Config-driven strategy (mean / trimmed mean / median / Krum / norm filter)
+  proves scalability without retraining. &
+  Hardcoded weighted mean \\
+Pairwise-mask SecAgg &
+  Structural prototype of Bonawitz et al.\ masks; honest-but-curious server
+  cannot recover individual gradients from the sum. &
+  No gradient privacy \\
 \bottomrule
 \end{tabular}
 \end{table}

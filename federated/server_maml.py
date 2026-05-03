@@ -41,6 +41,7 @@ def load_config(path: str | None) -> dict:
     cfg = _load_yaml(path)
     defaults.update(cfg.get("federated", {}))
     defaults.update(cfg.get("maml", {}))
+    defaults["_aggregation"] = cfg.get("aggregation", {})
     return defaults
 
 def main():
@@ -104,11 +105,18 @@ def main():
     del model
     gc.collect()
 
+    agg_cfg = cfg.get("_aggregation", {})
     strategy = PerFedAvgStrategy(
         initial_parameters=initial_params,
         outer_lr=cfg["outer_lr"],
         min_available_clients=cfg["min_available_clients"],
         fraction_fit=cfg["fraction_fit"],
+        robust_method=agg_cfg.get("robust_method", "mean"),
+        trim_ratio=agg_cfg.get("trim_ratio", 0.1),
+        n_byzantine=agg_cfg.get("n_byzantine", 1),
+        norm_filter_multiplier=agg_cfg.get("norm_filter_multiplier", 2.0),
+        secure_agg=bool(agg_cfg.get("secure_agg", False)),
+        secagg_mask_scale=agg_cfg.get("secagg_mask_scale", 0.01),
     )
 
     address = f"0.0.0.0:{cfg['port']}"
