@@ -225,7 +225,7 @@ class MAMLEngine:
         """
         import higher
 
-        from ctc.differentiable_ctc import ctc_loss_differentiable
+        from ctc.differentiable_ctc_v2 import ctc_loss_differentiable_fast as ctc_loss_differentiable
 
         dtype = next(self.model.model.parameters()).dtype
                                                
@@ -333,7 +333,7 @@ class MAMLEngine:
         """
         import higher
 
-        from ctc.differentiable_ctc import ctc_loss_differentiable
+        from ctc.differentiable_ctc_v2 import ctc_loss_differentiable_fast as ctc_loss_differentiable
 
         dtype = next(self.model.model.parameters()).dtype
 

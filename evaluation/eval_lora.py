@@ -182,7 +182,7 @@ def evaluate_with_adapt(
     as during MAML meta-training.
     """
     from maml.engine import _encode_audio as _enc_audio, _encode_labels
-    from ctc.differentiable_ctc import ctc_loss_differentiable
+    from ctc.differentiable_ctc_v2 import ctc_loss_differentiable_fast as ctc_loss_differentiable
 
     adapted = copy.deepcopy(model)
     dtype = next(adapted.model.parameters()).dtype
