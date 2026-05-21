@@ -61,6 +61,8 @@ class TestV2MatchesV1:
     def test_gradient_matches(self, T: int, S: int) -> None:
         logits, targets = _make_data(T, S)
         loss1, loss2, lp1, lp2 = _both_losses(logits, targets)
+        lp1.retain_grad()
+        lp2.retain_grad()
         loss1.backward()
         loss2.backward()
         max_rel = ((lp1.grad - lp2.grad).abs() / (lp1.grad.abs() + 1e-10)).max()
