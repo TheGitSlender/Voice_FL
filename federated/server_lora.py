@@ -32,6 +32,7 @@ def parse_args():
     p.add_argument("--rounds", type=int, default=None)
     p.add_argument("--port", type=int, default=None)
     p.add_argument("--outer_lr", type=float, default=None)
+    p.add_argument("--min_clients", type=int, default=None)
     return p.parse_args()
 
 
@@ -83,6 +84,8 @@ def main():
         cfg["port"] = args.port
     if args.outer_lr is not None:
         cfg["outer_lr"] = args.outer_lr
+    if args.min_clients is not None:
+        cfg["min_available_clients"] = args.min_clients
 
     import torch
     import flwr as fl

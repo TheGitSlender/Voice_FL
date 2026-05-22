@@ -29,10 +29,20 @@ sys.path.insert(0, str(ROOT))
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--config", type=str, default=None)
-    p.add_argument("--server_address", type=str, default=None)
+    p.add_argument("--server_address", type=str,
+                   default=os.environ.get("FL_SERVER_ADDRESS"),
+                   help="FL server address (host:port). "
+                        "Also reads FL_SERVER_ADDRESS env var. "
+                        "Defaults to 'server:8080' if neither is set.")
     p.add_argument("--device", type=str, default=None)
+    p.add_argument("--speaker_id", type=str, default=None,
+                   help="Speaker ID (e.g. RRBI). "
+                        "Also reads SPEAKER_ID env var.")
+    p.add_argument("--data_dir", type=str, default=None,
+                   help="Direct path to speaker data directory "
+                        "(must contain features.pt + labels.txt).")
     p.add_argument("--nodes_dir", type=str, default=None,
-                   help="Local nodes dir for direct runs (e.g. data/vctk_nodes). "
+                   help="Local nodes dir for direct runs (e.g. data/l2arctic_nodes). "
                         "In Docker the compose mounts the speaker dir at /data directly.")
     return p.parse_args()
 
@@ -74,14 +84,17 @@ def main():
     if args.device is not None:
         cfg["device"] = args.device
 
-    speaker_id = os.environ.get("SPEAKER_ID", "")
+    # Speaker ID: CLI arg > env var
+    speaker_id = args.speaker_id or os.environ.get("SPEAKER_ID", "")
     if not speaker_id:
-        print("ERROR: SPEAKER_ID environment variable not set", flush=True)
+        print("ERROR: Speaker ID not set. Use --speaker_id or SPEAKER_ID env var.", flush=True)
         sys.exit(1)
 
     # In Docker: compose mounts data/vctk_nodes/{speaker_id} → /data
-    # Direct run: use --nodes_dir to find the speaker directory
-    if args.nodes_dir is not None:
+    # Data directory: --data_dir (direct path) > --nodes_dir/speaker_id > /data (Docker)
+    if args.data_dir is not None:
+        node_dir = Path(args.data_dir)
+    elif args.nodes_dir is not None:
         node_dir = Path(args.nodes_dir) / speaker_id
     else:
         node_dir = Path("/data")
@@ -123,7 +136,7 @@ def main():
     import socket
     host, port_str = cfg["server_address"].rsplit(":", 1)
     port = int(port_str)
-    max_wait = 180
+    max_wait = 300
     poll_interval = 3
     elapsed = 0
     print(f"[node] Waiting for server at {host}:{port}...", flush=True)
