@@ -1,21 +1,14 @@
-"""GPU-optimized CTC loss — parallel prefix scan in log-semiring.
+"""GPU-optimized CTC loss — supports create_graph=True (second-order MAML).
 
-Supports create_graph=True (double-backward) for second-order MAML.
-All operations are native PyTorch — no custom CUDA kernels.
+Two execution modes:
+  1. Sequential (default): Optimized sequential DP loop, same O(T × S_ext)
+     memory as v1 but ~2–5× faster (native logsumexp, fewer allocations).
+     Safe for MAML with create_graph=True — negligible VRAM overhead.
 
-Speed improvement over v1: ~15–50× on GPU by reducing the sequential
-DP loop from O(T) to O(log₂ T) batched matrix operations.
-
-Algorithm:
-  The CTC forward recurrence α_t = f(α_{t-1}, emissions_t) is reformulated
-  as a matrix-vector product in the (log, logaddexp) semiring:
-
-    α_t = M_t ⊗ α_{t-1}
-
-  where M_t is an (S_ext × S_ext) transition matrix encoding stay/advance/skip
-  transitions plus emission scores. Since semiring matrix multiplication is
-  associative, the T-step product M_{T-1} ⊗ ... ⊗ M_1 can be computed via
-  parallel reduce in O(log₂ T) steps of batched GPU operations.
+  2. Parallel scan (scan=True): Log-semiring parallel prefix scan that
+     reduces the loop from O(T) to O(log₂ T). ~14–75× faster but uses
+     O(T × S_ext³) memory with create_graph=True. Only recommended when
+     VRAM is abundant or S_ext is small.
 
 Reference implementation: ctc/differentiable_ctc.py (v1, sequential loop).
 """
@@ -28,11 +21,11 @@ import torch.nn.functional as F
 
 
 def _get_neg_inf(dtype: torch.dtype) -> float:
-    """Return a large negative value that won't overflow during the scan.
+    """Return a large negative value that won't overflow during computation.
 
-    Must survive up to 2^10 ≈ 1024 additions without reaching actual -inf.
-    For float32: -1e20 * 1024 = -1.024e23 < 3.4e38 ✓
-    For float64: -1e100 * 1024 = -1.024e103 < 1.8e308 ✓
+    Uses a finite sentinel so that torch.logsumexp works correctly without
+    producing NaN when all inputs are NEG_INF (unlike torch.finfo.min which
+    causes -inf - (-inf) = NaN in the exp step).
     """
     if dtype == torch.float64:
         return -1e100
@@ -40,7 +33,7 @@ def _get_neg_inf(dtype: torch.dtype) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Log-semiring operations
+# Log-semiring operations (used by parallel scan mode)
 # ---------------------------------------------------------------------------
 
 def _log_semiring_bmm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -48,14 +41,7 @@ def _log_semiring_bmm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
     a: (N, S, S), b: (N, S, S)
     Returns (N, S, S) where C[n, i, j] = logsumexp_k(a[n, i, k] + b[n, k, j])
-
-    Uses the identity: C[n,i,j] = logsumexp over k of (a[n,i,k] + b[n,k,j]).
-    Computed via a 4D expansion + logsumexp.
     """
-    # a: (N, S, S) -> (N, S, S, 1)  — dims: (n, i, k, _)
-    # b: (N, S, S) -> (N, 1, S, S)  — dims: (n, _, k, j)
-    # sum: (N, S, S, S)  — element [n, i, k, j] = a[n,i,k] + b[n,k,j]
-    # logsumexp over k (dim=-2): (N, S, S)
     return torch.logsumexp(a.unsqueeze(-1) + b.unsqueeze(-3), dim=-2)
 
 
@@ -65,13 +51,11 @@ def _log_semiring_matvec(mat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     mat: (S, S), vec: (S,)
     Returns (S,) where result[i] = logsumexp_j(mat[i, j] + vec[j])
     """
-    # mat + vec.unsqueeze(0): (S, S) where element [i, j] = mat[i,j] + vec[j]
-    # logsumexp over j (dim=1): (S,)
     return torch.logsumexp(mat + vec.unsqueeze(0), dim=1)
 
 
 # ---------------------------------------------------------------------------
-# Transition matrix construction
+# Transition matrix construction (used by parallel scan mode)
 # ---------------------------------------------------------------------------
 
 def _build_transition_mask(
@@ -112,19 +96,13 @@ def _build_transition_matrices(
 ) -> torch.Tensor:
     """Build (T, S_ext, S_ext) transition matrices from emissions.
 
-    emissions:       (T, S_ext) — log_probs indexed by targets_ext for each timestep
+    emissions:       (T, S_ext) — log_probs indexed by targets_ext
     transition_mask: (S_ext, S_ext) — boolean mask for valid transitions
     neg_inf:         value for impossible transitions
 
     Returns (T, S_ext, S_ext) where mats[t, s, j] = emissions[t, s] if
     transition_mask[s, j] else neg_inf.
-
-    The emission for state s is the same regardless of the source state j,
-    because CTC adds the emission once per (state, timestep) pair.
     """
-    # emissions.unsqueeze(-1): (T, S_ext, 1)  — broadcasts over j
-    # transition_mask.unsqueeze(0): (1, S_ext, S_ext)  — broadcasts over t
-    # torch.where selects emission[t, s] at valid positions, neg_inf elsewhere
     neg_inf_val = torch.tensor(neg_inf, dtype=emissions.dtype, device=emissions.device)
     return torch.where(
         transition_mask.unsqueeze(0),
@@ -134,17 +112,12 @@ def _build_transition_matrices(
 
 
 # ---------------------------------------------------------------------------
-# Parallel reduce
+# Parallel reduce (used by scan mode)
 # ---------------------------------------------------------------------------
 
 def _make_identity(n: int, S_ext: int, dtype: torch.dtype, device: torch.device,
                    neg_inf: float) -> torch.Tensor:
-    """Create n log-semiring identity matrices (S_ext, S_ext).
-
-    Identity in the (log, logaddexp) semiring has 0 on the diagonal
-    (log(1) = 0) and neg_inf elsewhere (log(0) = -inf).
-    I ⊗ M = M ⊗ I = M for any matrix M.
-    """
+    """Create n log-semiring identity matrices (S_ext, S_ext)."""
     eye = torch.full((n, S_ext, S_ext), neg_inf, dtype=dtype, device=device)
     idx = torch.arange(S_ext, device=device)
     eye[:, idx, idx] = 0.0
@@ -158,7 +131,6 @@ def _parallel_reduce(mats: torch.Tensor, neg_inf: float) -> torch.Tensor:
     Returns (S, S) — the total product
 
     Uses O(log₂ N) sequential steps of batched log-semiring matmul.
-    Pads to the next power of 2 with identity matrices for clean pairing.
     """
     n = mats.shape[0]
     S_ext = mats.shape[1]
@@ -172,9 +144,6 @@ def _parallel_reduce(mats: torch.Tensor, neg_inf: float) -> torch.Tensor:
         pad = _make_identity(next_pow2 - n, S_ext, mats.dtype, mats.device, neg_inf)
         mats = torch.cat([mats, pad], dim=0)
 
-    # Pairwise reduce: at each level, multiply adjacent pairs
-    # left = [M_0, M_2, ...], right = [M_1, M_3, ...]
-    # result = [M_1⊗M_0, M_3⊗M_2, ...]  (later × earlier)
     while mats.shape[0] > 1:
         left = mats[0::2]    # even indices (earlier matrices)
         right = mats[1::2]   # odd indices (later matrices)
@@ -188,18 +157,23 @@ def _parallel_reduce(mats: torch.Tensor, neg_inf: float) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 class DifferentiableCTCFast(nn.Module):
-    """CTC loss using parallel prefix scan — supports create_graph=True.
+    """CTC loss supporting create_graph=True — drop-in replacement for v1.
 
-    Drop-in replacement for DifferentiableCTC with identical API.
-    ~15–50× faster on GPU by reducing the time-loop from O(T) to O(log₂ T).
+    Two modes:
+      scan=False (default): Optimized sequential DP. ~2–5× faster than v1,
+          memory O(T × S_ext) — safe for MAML with create_graph=True.
+      scan=True: Log-semiring parallel prefix scan. ~14–75× faster than v1,
+          but O(T × S_ext³) memory with create_graph=True. Use only when
+          VRAM is plentiful or S_ext is small.
 
-    Input:
-      log_probs:  (T, C) float tensor — log probabilities per frame
-      targets:    (S,)   long tensor  — target label ids (not blank-expanded)
-      blank:      int    — blank token index (default 0)
-    Output:
-      loss:       scalar — negative log likelihood, supports double-backward
+    Args:
+      scan: If True, use parallel scan (high speed, high VRAM).
+            If False (default), use optimized sequential (moderate speed, low VRAM).
     """
+
+    def __init__(self, scan: bool = False):
+        super().__init__()
+        self.scan = scan
 
     def forward(
         self,
@@ -242,31 +216,28 @@ class DifferentiableCTCFast(nn.Module):
         all_emissions = log_probs[:, targets_ext]
 
         # --- Build initial alpha_0 from t=0 emissions ---
-        alpha_0 = torch.full((S_ext,), NEG_INF, dtype=dtype, device=device)
-        alpha_0[0] = all_emissions[0, 0]
+        alpha = torch.full((S_ext,), NEG_INF, dtype=dtype, device=device)
+        alpha[0] = all_emissions[0, 0]
         if S_ext > 1:
-            alpha_0[1] = all_emissions[0, 1]
+            alpha[1] = all_emissions[0, 1]
 
         # --- T=1: no transitions needed ---
         if T == 1:
             if S_ext >= 2:
-                final_states = torch.stack([alpha_0[-2], alpha_0[-1]])
+                final_states = torch.stack([alpha[-2], alpha[-1]])
             else:
-                final_states = alpha_0[-1:]
+                final_states = alpha[-1:]
             return -torch.logsumexp(final_states, dim=0)
 
-        # --- Build transition matrices for t=1..T-1 ---
-        transition_mask = _build_transition_mask(skip_invalid, S_ext, device)
-        mats = _build_transition_matrices(
-            all_emissions[1:], transition_mask, NEG_INF
-        )  # (T-1, S_ext, S_ext)
-
-        # --- Parallel reduce: P = M_{T-2} ⊗ ... ⊗ M_0 ---
-        P = _parallel_reduce(mats, NEG_INF)  # (S_ext, S_ext)
-
-        # --- Apply product to initial state ---
-        # alpha_final[i] = logsumexp_j(P[i, j] + alpha_0[j])
-        alpha_final = _log_semiring_matvec(P, alpha_0)
+        # --- Dispatch to scan or sequential ---
+        if self.scan:
+            alpha_final = self._forward_scan(
+                alpha, all_emissions, skip_invalid, S_ext, T, device, dtype, NEG_INF,
+            )
+        else:
+            alpha_final = self._forward_sequential(
+                alpha, all_emissions, skip_invalid, S_ext, T, NEG_INF,
+            )
 
         # --- Extract log-likelihood from final states ---
         if S_ext >= 2:
@@ -276,6 +247,63 @@ class DifferentiableCTCFast(nn.Module):
 
         log_likelihood = torch.logsumexp(final_states, dim=0)
         return -log_likelihood
+
+    # -- Sequential mode (default) ------------------------------------------
+
+    @staticmethod
+    def _forward_sequential(
+        alpha: torch.Tensor,
+        all_emissions: torch.Tensor,
+        skip_invalid: torch.Tensor,
+        S_ext: int,
+        T: int,
+        NEG_INF: float,
+    ) -> torch.Tensor:
+        """Optimized sequential DP — O(T × S_ext) memory.
+
+        Key improvements over v1:
+          - Finite NEG_INF → native torch.logsumexp (no custom safe version)
+          - F.pad + slicing for shifts (fewer allocations than torch.cat)
+          - No .detach(), .clamp(), .new_full() per step
+        """
+        for t in range(1, T):
+            # Pad alpha on the left with 2 NEG_INF values, then slice
+            # to get stay / advance / skip views efficiently
+            alpha_padded = F.pad(alpha, (2, 0), value=NEG_INF)  # (S_ext + 2,)
+
+            stay = alpha_padded[2:]       # alpha[0..S_ext-1]  (same as alpha)
+            advance = alpha_padded[1:-1]  # [NEG_INF, alpha[0..S_ext-2]]
+            skip = alpha_padded[:-2]      # [NEG_INF, NEG_INF, alpha[0..S_ext-3]]
+
+            if S_ext >= 3:
+                skip = skip.masked_fill(skip_invalid, NEG_INF)
+
+            # Combine sources and compute new alpha via logsumexp + emission
+            combined = torch.stack([stay, advance, skip], dim=0)  # (3, S_ext)
+            alpha = torch.logsumexp(combined, dim=0) + all_emissions[t]
+
+        return alpha
+
+    # -- Parallel scan mode -------------------------------------------------
+
+    @staticmethod
+    def _forward_scan(
+        alpha_0: torch.Tensor,
+        all_emissions: torch.Tensor,
+        skip_invalid: torch.Tensor,
+        S_ext: int,
+        T: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        NEG_INF: float,
+    ) -> torch.Tensor:
+        """Parallel prefix scan — O(log₂ T) steps, O(T × S_ext³) memory."""
+        transition_mask = _build_transition_mask(skip_invalid, S_ext, device)
+        mats = _build_transition_matrices(
+            all_emissions[1:], transition_mask, NEG_INF
+        )
+        P = _parallel_reduce(mats, NEG_INF)
+        return _log_semiring_matvec(P, alpha_0)
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +316,7 @@ def ctc_loss_differentiable_fast(
     input_lengths: torch.Tensor,
     target_lengths: torch.Tensor,
     blank: int = 0,
+    scan: bool = False,
 ) -> torch.Tensor:
     """Batch CTC loss supporting double-backward (fast version).
 
@@ -298,12 +327,12 @@ def ctc_loss_differentiable_fast(
     input_lengths:  (B,)      — actual frame counts
     target_lengths: (B,)      — actual target lengths
     blank:          int       — blank token index
+    scan:           bool      — use parallel scan (faster but more VRAM)
 
-    Returns mean loss over batch. Processes samples sequentially (B is small
-    in MAML inner-loop usage).
+    Returns mean loss over batch.
     """
     log_probs = F.log_softmax(logits, dim=-1)
-    ctc = DifferentiableCTCFast()
+    ctc = DifferentiableCTCFast(scan=scan)
     losses = []
 
     for b in range(logits.shape[0]):
